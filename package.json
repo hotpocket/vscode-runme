@@ -677,14 +677,8 @@
           "runme.experiments.grpcSerializer": {
             "type": "boolean",
             "scope": "window",
-            "default": false,
-            "markdownDescription": "If set to `true`, the notebook serialization will use the GRPC instead of the WebAssembly interface."
-          },
-          "runme.experiments.connectSerializer": {
-            "type": "boolean",
-            "scope": "window",
             "default": true,
-            "markdownDescription": "If set to `true`, the notebook serialization will use the the Connect protocol instead of the WebAssembly or GRPC."
+            "markdownDescription": "If set to `true`, the notebook serialization will use the GRPC instead of the WebAssembly interface."
           },
           "runme.experiments.grpcRunner": {
             "type": "boolean",
@@ -967,6 +961,11 @@
             "type": "string",
             "default": "http://localhost:8877/api",
             "description": "The base URL of the AI service."
+          },
+          "runme.serializerAddress": {
+            "type": "string",
+            "default": "http://localhost:1234/connect",
+            "description": "The base URL for the connect protocol serialization service."
           },
           "runme.app.docsUrl": {
             "type": "string",

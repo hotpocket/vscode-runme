@@ -100,8 +100,9 @@ export class RunmeExtension {
 
   async initialize(context: ExtensionContext) {
     const kernel = new Kernel(context)
+    const config = workspace.getConfiguration('runme')
+    const serializerAddress = config.get<string>('serializerAddress')
     const useGrpcSerializer = kernel.hasExperimentEnabled('grpcSerializer')
-    const useConnectSerializer = kernel.hasExperimentEnabled('connectSerializer')
     const grpcServer = kernel.hasExperimentEnabled('grpcServer')
     const grpcRunner = kernel.hasExperimentEnabled('grpcRunner')
 
@@ -128,11 +129,14 @@ export class RunmeExtension {
     )
 
     const reporter = new GrpcReporter(context, server)
-    const serializer = useConnectSerializer
-      ? new ConnectSerializer(context, kernel)
-      : useGrpcSerializer
-        ? new GrpcSerializer(context, server, kernel)
-        : new WasmSerializer(context, kernel)
+    let serializer: SerializerBase
+    if (serializerAddress) {
+      serializer = new ConnectSerializer(context, kernel)
+    } else if (useGrpcSerializer) {
+      serializer = new GrpcSerializer(context, server, kernel)
+    } else {
+      serializer = new WasmSerializer(context, kernel)
+    }
     this.serializer = serializer
     kernel.setSerializer(serializer)
     kernel.setReporter(reporter)
