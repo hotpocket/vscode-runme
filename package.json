@@ -962,6 +962,11 @@
             "default": "http://localhost:8877/api",
             "description": "The base URL of the AI service."
           },
+          "runme.serializerAddress": {
+            "type": "string",
+            "default": "http://localhost:1234/connect",
+            "description": "The base URL for the connect protocol serialization service."
+          },
           "runme.app.docsUrl": {
             "type": "string",
             "scope": "window",
