@@ -12,15 +12,6 @@ plugins:
     # Add more plugin options here
     opt: target=ts
 
+# see stateful buf.gen.yaml for the offical config
+# https://github.com/stateful/runme/blob/main/buf.gen.yaml
 
-
-# version: v1
-# name: buf.build/stateful/runme
-# deps:
-#   - buf.build/bufbuild/protovalidate
-# lint:
-#   use:
-#     - STANDARD
-# breaking:
-#   use:
-#     - FILE

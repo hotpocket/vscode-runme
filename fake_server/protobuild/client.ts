@@ -1,8 +1,15 @@
 import { createPromiseClient, PromiseClient } from '@connectrpc/connect'
 import { createConnectTransport } from '@connectrpc/connect-node'
+import {
+  DeserializeRequest,
+  SerializeRequest,
+  Notebook
+} from '@buf/stateful_runme.bufbuild_es/runme/parser/v1/parser_pb'
+import { ParserService } from '@buf/stateful_runme.connectrpc_es/runme/parser/v1/parser_connect'
 
-import { ParserService } from './src/gen/service_connect'
-import { DeserializeRequest, Notebook, SerializeRequest } from './src/gen/service_pb'
+// OLD MANUAL IMPORT PATHS from manual generation
+// import { DeserializeRequest, SerializeRequest, Notebook } from './src/gen/runme/parser/v1/service_pb'
+// import { ParserService } from './src/gen/runme/parser/v1/service_connect'
 
 const transport = createConnectTransport({
   baseUrl: 'http://localhost:8080',
@@ -10,7 +17,6 @@ const transport = createConnectTransport({
 })
 
 async function main() {
-  // const client: PromiseClient<typeof ParserService> = createPromiseClient(ParserService, transport)
   const client: PromiseClient<typeof ParserService>= createPromiseClient(ParserService, transport)
   // serialize something
   const notebook = new Notebook({
