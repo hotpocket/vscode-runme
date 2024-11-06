@@ -1,0 +1,18 @@
+{
+  "name": "fake_server",
+  "version": "1.0.0",
+  "description": "* follow docs to make parser connect service here * hit server using curl & ensure a proper round trip for dummy hello world stuff",
+  "main": "con_serv.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@buf/stateful_runme.connectrpc_es": "^1.5.0-20241021161352-11c142f88aee.1",
+    "@bufbuild/buf": "^1.46.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
