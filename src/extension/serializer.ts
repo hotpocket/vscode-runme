@@ -1003,3 +1003,98 @@ export class GrpcSerializer extends SerializerBase {
     return this.notebookDataCache.get(cacheId)
   }
 }
+// there is w/ grpc the : serializer, server, runner,
+export class ConnectSerializer extends SerializerBase {
+  protected readonly ready: ReadyPromise
+
+  constructor(
+    protected context: ExtensionContext,
+    // protected client: any,
+    kernel: Kernel,
+  ) {
+    super(context, kernel)
+    this.ready = new Promise((resolve) => {
+      resolve()
+    })
+  }
+
+  // createAIClient = () => {
+  //   const config = vscode.workspace.getConfiguration('runme')
+  //   const baseURL = config.get<string>('aiBaseURL', 'http://localhost:8877/api')
+  //   this.log.info(`AI: Using AI service at: ${baseURL}`)
+  //   return createPromiseClient(AIService, createDefaultTransport(baseURL))
+  // }
+
+  protected async saveNotebook(
+    data: NotebookData,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Uint8Array> {
+    const encoder = new TextEncoder()
+    // eslint-disable-next-line quotes
+    const val = `The notebook has ${data.cells.length} cell(s)`
+    return encoder.encode(val)
+  }
+
+  protected async reviveNotebook(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    content: Uint8Array,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Serializer.Notebook> {
+    const markdown = Buffer.from(content).toString('utf8')
+    log.info('reviveNotebook', markdown)
+    // eslint-disable-next-line quotes
+    const notebook: Serializer.Notebook = {
+      cells: [
+        {
+          kind: NotebookCellKind.Markup,
+          value: `The length of the input byte
+array is ${content.length} bytes.`,
+          languageId: '',
+          metadata: {},
+          // outputs: [],
+        },
+      ],
+      metadata: {},
+      frontmatter: {
+        shell: '',
+        cwd: '',
+        skipPrompts: false,
+        category: '',
+        terminalRows: '',
+        runme: { id: 'STUB_VALUE', version: 'v3' },
+      },
+    }
+
+    if (!notebook) {
+      return this.printCell('⚠️ __Error__: no cells found!')
+    }
+    return notebook
+  }
+
+  protected async saveNotebookOutputsByCacheId(_cacheId: string): Promise<number> {
+    console.error('saveNotebookOutputsByCacheId not implemented for WasmSerializer')
+    return -1
+  }
+
+  public async saveNotebookOutputs(_uri: Uri): Promise<number> {
+    console.error('saveNotebookOutputs not implemented for WasmSerializer')
+    return -1
+  }
+
+  public getMaskedCache(): Promise<Uint8Array> | undefined {
+    console.error('getMaskedCache not implemented for WasmSerializer')
+    return Promise.resolve(new Uint8Array())
+  }
+
+  public getPlainCache(): Promise<Uint8Array> | undefined {
+    console.error('getPlainCache not implemented for WasmSerializer')
+    return Promise.resolve(new Uint8Array())
+  }
+
+  public getNotebookDataCache(): NotebookData | undefined {
+    console.error('getNotebookDataCache not implemented for WasmSerializer')
+    return {} as NotebookData
+  }
+}

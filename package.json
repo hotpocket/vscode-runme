@@ -966,6 +966,11 @@
             "default": true,
             "markdownDescription": "If set to `true` enables Stateful Authentication Provider"
           },
+          "runme.serializerAddress": {
+            "type": "string",
+            "default": "http://localhost:1234/connect",
+            "description": "The base URL for the connect protocol serialization service."
+          },
           "runme.app.docsUrl": {
             "type": "string",
             "scope": "window",
