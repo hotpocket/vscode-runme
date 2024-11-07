@@ -12,7 +12,7 @@ import { ParserService } from '@buf/stateful_runme.connectrpc_es/runme/parser/v1
 // import { ParserService } from './src/gen/runme/parser/v1/service_connect'
 
 const transport = createConnectTransport({
-  baseUrl: 'http://localhost:8080',
+  baseUrl: 'http://localhost:1234',
   httpVersion: '1.1'
 })
 

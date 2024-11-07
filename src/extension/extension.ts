@@ -130,8 +130,8 @@ export class RunmeExtension {
 
     const reporter = new GrpcReporter(context, server)
     let serializer: SerializerBase
-    if (!serializerAddress) {
-      serializer = new ConnectSerializer(context, kernel)
+    if (serializerAddress) {
+      serializer = new ConnectSerializer(context, serializerAddress, kernel)
     } else if (useGrpcSerializer) {
       serializer = new GrpcSerializer(context, server, kernel)
     } else {

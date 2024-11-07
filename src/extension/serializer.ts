@@ -23,6 +23,14 @@ import { GrpcTransport } from '@protobuf-ts/grpc-transport'
 import { ulid } from 'ulidx'
 import { maskString } from 'data-guardian'
 import YAML from 'yaml'
+import { ParserService } from '@buf/stateful_runme.connectrpc_es/runme/parser/v1/parser_connect'
+import { createConnectTransport } from '@connectrpc/connect-node'
+import { createPromiseClient, PromiseClient } from '@connectrpc/connect'
+import {
+  // DeserializeRequest as ConnectDeserializeRequest,
+  SerializeRequest as ConnectSerializeRequest,
+  Notebook as ConnectNotebook,
+} from '@buf/stateful_runme.bufbuild_es/runme/parser/v1/parser_pb'
 
 import { Serializer } from '../types'
 import {
@@ -1009,7 +1017,7 @@ export class ConnectSerializer extends SerializerBase {
 
   constructor(
     protected context: ExtensionContext,
-    // protected client: any,
+    protected serializerAddress: string,
     kernel: Kernel,
   ) {
     super(context, kernel)
@@ -1030,10 +1038,23 @@ export class ConnectSerializer extends SerializerBase {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Uint8Array> {
-    const encoder = new TextEncoder()
-    // eslint-disable-next-line quotes
-    const val = `The notebook has ${data.cells.length} cell(s)`
-    return encoder.encode(val)
+    const transport = createConnectTransport({
+      baseUrl: this.serializerAddress,
+      httpVersion: '1.1',
+    })
+    const client: PromiseClient<typeof ParserService> = createPromiseClient(
+      ParserService,
+      transport,
+    )
+    const notebook = new ConnectNotebook({
+      cells: [{ value: `The notebook has ${data.cells.length} cell(s)`, kind: 1 }],
+      metadata: {},
+      frontmatter: {},
+    })
+    const req = new ConnectSerializeRequest()
+    req.notebook = notebook
+    const sr = await client.serialize(req)
+    return sr.result
   }
 
   protected async reviveNotebook(
@@ -1058,6 +1079,7 @@ array is ${content.length} bytes.`,
       ],
       metadata: {},
       frontmatter: {
+        tag: '',
         shell: '',
         cwd: '',
         skipPrompts: false,

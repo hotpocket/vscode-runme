@@ -33,6 +33,7 @@ async function deserialize(request: DeserializeRequest): Promise<DeserializeResp
     ],
     metadata: {},
     frontmatter: {
+      tag: '',
       shell: '',
       cwd: '',
       skipPrompts: false,
