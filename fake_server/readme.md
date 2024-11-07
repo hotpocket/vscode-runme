@@ -38,3 +38,8 @@ echo; curl -X POST \
  http://localhost:8080/runme.parser.v1.ParserService/Deserialize  ; echo;
 
 ```
+
+```sh {"id":"01JC2GHY8CRCTH1H5MNJGF9FTH"}
+# or run it with the provided test client in typescript
+npx tsx ./client.ts
+```
