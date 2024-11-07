@@ -19,8 +19,8 @@ import {
 
 // Implementing the Deserialize and Serialize methods
 async function deserialize(request: DeserializeRequest): Promise<DeserializeResponse> {
+  console.log('Deserialize request:', JSON.stringify(request))
   const markdown = Buffer.from(request?.source).toString('utf8')
-  console.log('Deserialize request:', markdown)
   const dummyNotebook = {
     cells: [
       {
@@ -29,7 +29,7 @@ async function deserialize(request: DeserializeRequest): Promise<DeserializeResp
         languageId: '',
         metadata: {},
         // outputs: [],
-      } as Cell,
+      },
     ],
     metadata: {},
     frontmatter: {
@@ -39,14 +39,13 @@ async function deserialize(request: DeserializeRequest): Promise<DeserializeResp
       category: '',
       terminalRows: '',
       runme: { id: 'STUB_VALUE', version: 'v3' } as FrontmatterRunme,
-    } as Frontmatter,
-  } as Notebook
+    },
+  }
   return new DeserializeResponse({notebook : dummyNotebook})
 }
 
 async function serialize(request: SerializeRequest): Promise<SerializeResponse> {
-  // let notebook = JSON.stringify(request.notebook)
-  // console.log('Serialize request:', notebook)
+  console.log('Serialize request:', JSON.stringify(request))
   const encoder = new TextEncoder()
   const val = `The notebook has ${request.notebook?.cells?.length ?? -1} cell(s)`
   return new SerializeResponse({
