@@ -4,7 +4,7 @@ runme:
   version: v3
 ---
 
-This folder contains a test connect enpoint for work on splitting execution from serialzation - specifically to give us an endpoint to verify we can connect from the runme plugin's ConnectSerializer class. 
+This folder contains a test connect enpoint for work on splitting execution from serialzation - specifically to give us an endpoint to verify we can connect from the runme plugin's ConnectSerializer class.
 
 Install deps, start the server:
 
@@ -43,3 +43,7 @@ echo; curl -X POST \
 # or run it with the provided test client in typescript
 npx tsx ./client.ts
 ```
+
+Open Questions:
+
+? I see createPromiseClient is used to create a connection to agent but don't see this method being used by runme to connect to it's native grpc service.  Is this OK?
