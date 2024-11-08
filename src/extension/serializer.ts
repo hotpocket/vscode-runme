@@ -27,7 +27,7 @@ import { ParserService } from '@buf/stateful_runme.connectrpc_es/runme/parser/v1
 import { createConnectTransport } from '@connectrpc/connect-node'
 import { createPromiseClient, PromiseClient } from '@connectrpc/connect'
 import {
-  // DeserializeRequest as ConnectDeserializeRequest,
+  DeserializeRequest as ConnectDeserializeRequest,
   SerializeRequest as ConnectSerializeRequest,
   Notebook as ConnectNotebook,
 } from '@buf/stateful_runme.bufbuild_es/runme/parser/v1/parser_pb'
@@ -1063,36 +1063,26 @@ export class ConnectSerializer extends SerializerBase {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Serializer.Notebook> {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const markdown = Buffer.from(content).toString('utf8')
-    log.info('reviveNotebook', markdown)
-    // eslint-disable-next-line quotes
-    const notebook: Serializer.Notebook = {
-      cells: [
-        {
-          kind: NotebookCellKind.Markup,
-          value: `The length of the input byte
-array is ${content.length} bytes.`,
-          languageId: '',
-          metadata: {},
-          // outputs: [],
-        },
-      ],
-      metadata: {},
-      frontmatter: {
-        tag: '',
-        shell: '',
-        cwd: '',
-        skipPrompts: false,
-        category: '',
-        terminalRows: '',
-        runme: { id: 'STUB_VALUE', version: 'v3' },
-      },
-    }
+    // log.info('reviveNotebook', markdown)
+    const deserializeRequest = new ConnectDeserializeRequest()
+    deserializeRequest.source = content
+    const transport = createConnectTransport({
+      baseUrl: 'http://localhost:1234',
+      httpVersion: '1.1',
+    })
+    const client: PromiseClient<typeof ParserService> = createPromiseClient(
+      ParserService,
+      transport,
+    )
+    const res = await client.deserialize(deserializeRequest)
+    const notebook = res.notebook
 
     if (!notebook) {
       return this.printCell('⚠️ __Error__: no cells found!')
     }
-    return notebook
+    return notebook as any as Serializer.Notebook // ugly cast :(
   }
 
   protected async saveNotebookOutputsByCacheId(_cacheId: string): Promise<number> {
