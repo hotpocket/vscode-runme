@@ -23,7 +23,7 @@ echo; curl -X POST \
 -H "Content-Type: application/json" \
 -H "Connect-Protocol-Version: 1" \
 -d '{"notebook":{"cells":[{"kind":1,"value":"markdown data","languageId":"","metadata":{},"outputs":[]}],"metadata":{},"frontmatter":{"shell":"","cwd":"","skipPrompts":false,"category":"","terminalRows":"","tag":""}}}' \
-http://localhost:8080/runme.parser.v1.ParserService/Serialize 2> /dev/null | jq -r ".result" | base64 -d ;echo;echo
+http://localhost:1234/runme.parser.v1.ParserService/Serialize 2> /dev/null | jq -r ".result" | base64 -d ;echo;echo
 
 ```
 
@@ -35,7 +35,7 @@ echo; curl -X POST \
  -H "Content-Type: application/json" \
  -H "Connect-Protocol-Version: 1" \
  -d '{"source":"VGhlIG5vdGVib29rIGhhcyAxIGNlbGwocyk="}'\
- http://localhost:8080/runme.parser.v1.ParserService/Deserialize  ; echo;
+ http://localhost:1234/runme.parser.v1.ParserService/Deserialize  ; echo;
 
 ```
 
