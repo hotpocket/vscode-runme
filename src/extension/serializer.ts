@@ -1014,38 +1014,40 @@ export class GrpcSerializer extends SerializerBase {
 // there is w/ grpc the : serializer, server, runner,
 export class ConnectSerializer extends SerializerBase {
   protected readonly ready: ReadyPromise
+  log: ReturnType<typeof getLogger>
+  client: PromiseClient<typeof ParserService>
+  serializerServiceUrl: string
 
   constructor(
     protected context: ExtensionContext,
-    protected serializerAddress: string,
+    serializerAddress: string,
     kernel: Kernel,
   ) {
     super(context, kernel)
+    this.log = getLogger('ConnectSerializer')
+    this.serializerServiceUrl = serializerAddress
+    this.client = this.createSerializerClient()
     this.ready = new Promise((resolve) => {
       resolve()
     })
   }
 
-  // createAIClient = () => {
-  //   const config = vscode.workspace.getConfiguration('runme')
-  //   const baseURL = config.get<string>('aiBaseURL', 'http://localhost:8877/api')
-  //   this.log.info(`AI: Using AI service at: ${baseURL}`)
-  //   return createPromiseClient(AIService, createDefaultTransport(baseURL))
-  // }
+  createSerializerClient = () => {
+    this.log.info(`Serializer: Client pointed to: ${this.serializerServiceUrl}`)
+    return createPromiseClient(
+      ParserService,
+      createConnectTransport({
+        baseUrl: this.serializerServiceUrl,
+        httpVersion: '1.1',
+      }),
+    )
+  }
 
   protected async saveNotebook(
     data: NotebookData,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Uint8Array> {
-    const transport = createConnectTransport({
-      baseUrl: this.serializerAddress,
-      httpVersion: '1.1',
-    })
-    const client: PromiseClient<typeof ParserService> = createPromiseClient(
-      ParserService,
-      transport,
-    )
     const notebook = new ConnectNotebook({
       cells: [{ value: `The notebook has ${data.cells.length} cell(s)`, kind: 1 }],
       metadata: {},
@@ -1053,7 +1055,7 @@ export class ConnectSerializer extends SerializerBase {
     })
     const req = new ConnectSerializeRequest()
     req.notebook = notebook
-    const sr = await client.serialize(req)
+    const sr = await this.client.serialize(req)
     return sr.result
   }
 
@@ -1068,15 +1070,16 @@ export class ConnectSerializer extends SerializerBase {
     // log.info('reviveNotebook', markdown)
     const deserializeRequest = new ConnectDeserializeRequest()
     deserializeRequest.source = content
-    const transport = createConnectTransport({
-      baseUrl: 'http://localhost:1234',
-      httpVersion: '1.1',
-    })
-    const client: PromiseClient<typeof ParserService> = createPromiseClient(
-      ParserService,
-      transport,
-    )
-    const res = await client.deserialize(deserializeRequest)
+    let res
+    try {
+      res = await this.client.deserialize(deserializeRequest)
+    } catch (e: any) {
+      if (e.name === 'ConnectError') {
+        e.message = `Unable to connect to the serializer service at ${this.serializerServiceUrl}`
+      }
+      log.error('Error in reviveNotebook  ', e as any)
+      throw e
+    }
     const notebook = res.notebook
 
     if (!notebook) {
