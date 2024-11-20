@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 
 import {
@@ -24,7 +25,8 @@ import { ulid } from 'ulidx'
 import { maskString } from 'data-guardian'
 import YAML from 'yaml'
 import { ParserService } from '@buf/stateful_runme.connectrpc_es/runme/parser/v1/parser_connect'
-import { createConnectTransport } from '@connectrpc/connect-node'
+import { createConnectTransport, createGrpcTransport } from '@connectrpc/connect-node'
+// import { ChannelCredentials } from '@grpc/grpc-js'
 import { createPromiseClient, PromiseClient } from '@connectrpc/connect'
 import {
   DeserializeRequest as ConnectDeserializeRequest,
@@ -1034,13 +1036,36 @@ export class ConnectSerializer extends SerializerBase {
 
   createSerializerClient = () => {
     this.log.info(`Serializer: Client pointed to: ${this.serializerServiceUrl}`)
-    return createPromiseClient(
-      ParserService,
-      createConnectTransport({
-        baseUrl: this.serializerServiceUrl,
-        httpVersion: '1.1',
-      }),
-    )
+    // prior attempt to avoid self signed cert rejection error - did not work
+    // process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+
+    // for some reason the path in the initial include is NOT available here when debugging
+    const p = require('node:path')
+    const tlsFile = p.normalize(__dirname + '/../tls/cert.pem')
+    const cert = fs.readFileSync(tlsFile)
+    let transport
+    transport = createGrpcTransport({
+      baseUrl: this.serializerServiceUrl,
+      httpVersion: '2',
+      nodeOptions: {
+        // TLS or insecure settings
+        rejectUnauthorized: false, // Use only in dev for self-signed certificates
+        // ca: fs.readFileSync('/tls/cert.pem'), // Add custom CA for production
+        ca: cert,
+      },
+    })
+
+    /*
+import fs from 'node:fs/promises'
+import path from 'node:path'
+*/
+    transport = createConnectTransport({
+      baseUrl: this.serializerServiceUrl,
+      httpVersion: '1.1',
+    })
+
+    const client = createPromiseClient(ParserService, transport)
+    return client
   }
 
   protected async saveNotebook(
