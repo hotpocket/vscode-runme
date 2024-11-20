@@ -1055,14 +1055,10 @@ export class ConnectSerializer extends SerializerBase {
       },
     })
 
-    /*
-import fs from 'node:fs/promises'
-import path from 'node:path'
-*/
-    transport = createConnectTransport({
-      baseUrl: this.serializerServiceUrl,
-      httpVersion: '1.1',
-    })
+    // transport = createConnectTransport({
+    //   baseUrl: this.serializerServiceUrl,
+    //   httpVersion: '1.1',
+    // })
 
     const client = createPromiseClient(ParserService, transport)
     return client
