@@ -47,3 +47,26 @@ npx tsx ./client.ts
 Connecting to a local grpc server using connectrpc with a grpc transport.
 
 the `bin/runme` server will load certs from `~/.config/runme/tls` by default but can be pointed to the `tls` project folder. `client2.ts` was created to auto start an instance and connect to it demonstrating how to start the server in addition to how to use the grpc transport with a connectrpc connection.
+
+```sh
+# don't die on error
+set +e
+
+# (assuming you are running the runme extension & have it configured normally)
+echo "md5 of the cert the binary/server uses"
+openssl s_client -connect localhost:7863 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' | md5sum
+
+echo "md5 of the default cert"
+cat ~/.config/runme/tls/cert.pem | md5sum
+
+echo "md5 of the repo cert"
+cat ../tls/cert.pem  | md5sum
+
+```
+
+If the cert the server is using differs from the one our client uses the connection will fail. By default the test `client2.ts` script will start on port 9999 which should not be in use, but you can get it to error if you set it to 7863 which should have a listening server if you are in vscode and are using the runme extension right now.
+
+```sh
+# run client2.ts - demonstrate a proper client server config
+npx tsx ./client2.ts --useTls=true
+```
