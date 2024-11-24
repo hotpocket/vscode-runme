@@ -44,6 +44,6 @@ echo; curl -X POST \
 npx tsx ./client.ts
 ```
 
-Open Questions:
+Connecting to a local grpc server using connectrpc with a grpc transport.
 
-? I see createPromiseClient is used to create a connection to agent but don't see this method being used by runme to connect to it's native grpc service.  Is this OK?
+the `bin/runme` server will load certs from `~/.config/runme/tls` by default but can be pointed to the `tls` project folder. `client2.ts` was created to auto start an instance and connect to it demonstrating how to start the server in addition to how to use the grpc transport with a connectrpc connection.
