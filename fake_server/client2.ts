@@ -115,13 +115,9 @@ function setupTransport() {
       config.baseUrl = `https://${host}:${port}`
       const cert = fs.readFileSync(certPath)
       const key = fs.readFileSync(keyPath)
-       // Path to the saved self-signed certificate extracted from the runme server via
-       // openssl s_client -connect localhost:9999 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p'
-      const ca = fs.readFileSync(path.normalize(__dirname + '/../tls/server-cert.pem'))
       config.nodeOptions = {
         cert,
         key,
-        ca,
         rejectUnauthorized: false, // Use only in dev for self-signed certificates
       }
     }
