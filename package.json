@@ -1002,7 +1002,8 @@
           },
           "runme.serializerAddress": {
             "type": "string",
-            "default": "https://localhost:7863",
+            "xdefault": "",
+            "default": "https://localhost:9999",
             "description": "The base URL for the connect protocol serialization service."
           },
           "runme.app.docsUrl": {
