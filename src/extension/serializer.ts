@@ -749,7 +749,8 @@ export class GrpcSerializer extends SerializerBase {
   ): Promise<Uint8Array> {
     const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
 
-    const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
+    // const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
+    const notebook = Marshal.notebook(data, 'Notebook', { marshalFrontmatter }) as Notebook
 
     if (marshalFrontmatter) {
       data.metadata ??= {}
@@ -861,137 +862,14 @@ export class GrpcSerializer extends SerializerBase {
       kernel?: Kernel
     },
   ): Notebook {
-    // the bulk copies cleanly except for what's below
-    const notebook = Notebook.clone(data as any)
-
-    // cannot gurantee it wasn't changed
-    if (notebook.metadata[RUNME_FRONTMATTER_PARSED]) {
-      delete notebook.metadata[RUNME_FRONTMATTER_PARSED]
-    }
-
-    if (config?.marshalFrontmatter) {
-      const metadata = notebook.metadata as unknown as {
-        ['runme.dev/frontmatter']: string
-      }
-      notebook.frontmatter = this.marshalFrontmatter(metadata, config.kernel)
-    }
-
-    notebook.cells.forEach(async (cell, cellIdx) => {
-      const dataExecSummary = data.cells[cellIdx].executionSummary
-      cell.executionSummary = this.marshalCellExecutionSummary(dataExecSummary)
-      const dataOutputs = data.cells[cellIdx].outputs
-      cell.outputs = this.marshalCellOutputs(cell.outputs, dataOutputs)
-    })
-
-    return notebook
+    return Marshal.notebook(data, 'Notebook', config) as Notebook
   }
 
   static marshalFrontmatter(
     metadata: { ['runme.dev/frontmatter']?: string },
     kernel?: Kernel,
   ): Frontmatter {
-    if (
-      !metadata.hasOwnProperty('runme.dev/frontmatter') ||
-      typeof metadata['runme.dev/frontmatter'] !== 'string'
-    ) {
-      log.warn('no frontmatter found in metadata')
-      return {
-        category: '',
-        tag: '',
-        cwd: '',
-        runme: {
-          id: '',
-          version: '',
-        },
-        shell: '',
-        skipPrompts: false,
-        terminalRows: '',
-      }
-    }
-
-    const rawFrontmatter = metadata['runme.dev/frontmatter']
-    let data: {
-      runme: {
-        id?: string
-        version?: string
-      }
-    } = { runme: {} }
-
-    if (rawFrontmatter) {
-      try {
-        const yamlDocs = YAML.parseAllDocuments(metadata['runme.dev/frontmatter'])
-        data = (yamlDocs[0].toJS?.() || {}) as typeof data
-      } catch (error: any) {
-        log.warn('failed to parse frontmatter, reason: ', error.message)
-      }
-    }
-
-    return {
-      runme: {
-        id: data.runme?.id || '',
-        version: data.runme?.version || '',
-        session: { id: kernel?.getRunnerEnvironment()?.getSessionId() || '' },
-      },
-      category: '',
-      tag: '',
-      cwd: '',
-      shell: '',
-      skipPrompts: false,
-      terminalRows: '',
-    }
-  }
-
-  private static marshalCellOutputs(
-    outputs: CellOutput[],
-    dataOutputs: NotebookCellOutput[] | undefined,
-  ): CellOutput[] {
-    if (!dataOutputs) {
-      return []
-    }
-
-    outputs.forEach((out, outIdx) => {
-      const dataOut: NotebookCellOutputWithProcessInfo = dataOutputs[outIdx]
-      // todo(sebastian): consider sending error state too
-      if (dataOut.processInfo?.exitReason?.type === 'exit') {
-        if (dataOut.processInfo.exitReason.code) {
-          out.processInfo!.exitReason!.code!.value = dataOut.processInfo.exitReason.code
-        } else {
-          out.processInfo!.exitReason!.code = undefined
-        }
-
-        if (dataOut.processInfo?.pid !== undefined) {
-          out.processInfo!.pid = { value: dataOut.processInfo.pid.toString() }
-        } else {
-          out.processInfo!.pid = undefined
-        }
-      }
-      out.items.forEach((item) => {
-        item.type = item.data.buffer ? 'Buffer' : typeof item.data
-      })
-    })
-
-    return outputs
-  }
-
-  private static marshalCellExecutionSummary(
-    executionSummary: NotebookCellExecutionSummary | undefined,
-  ) {
-    if (!executionSummary) {
-      return undefined
-    }
-
-    const { success, timing } = executionSummary
-    if (success === undefined || timing === undefined) {
-      return undefined
-    }
-
-    return {
-      success: { value: success },
-      timing: {
-        endTime: { value: timing!.endTime.toString() },
-        startTime: { value: timing!.startTime.toString() },
-      },
-    }
+    return Marshal.frontmatter(metadata, kernel)
   }
 
   protected async reviveNotebook(
@@ -1090,18 +968,10 @@ export class ConnectSerializer extends SerializerBase {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Uint8Array> {
-    const notebook = SerialHelper.marshalNotebook(data, es_proto.Notebook)
-
-    // console.log('marshalled notebook:', mn)
-    // const notebook = new es_proto.Notebook({
-    //   cells: [{ value: `The notebook has ${data.cells.length} cell(s)`, kind: 1 }],
-    //   metadata: {},
-    //   frontmatter: {},
-    // })
-    const req = new es_proto.SerializeRequest({ notebook })
-    // req.notebook = notebook
-    const sr = await this.client.serialize(req)
-    return sr.result
+    const notebook = Marshal.notebook(data, 'es_proto') as es_proto.Notebook
+    const request = new es_proto.SerializeRequest({ notebook })
+    const response = await this.client.serialize(request)
+    return response.result
   }
 
   protected async reviveNotebook(
@@ -1156,25 +1026,23 @@ export class ConnectSerializer extends SerializerBase {
   }
 }
 
-class SerialHelper {
-  public static myTypeOf(someThing: any) {
-    const match = new Object().toString.call(someThing).match(/\[object (.*?)\]/)
-    return match ? match[1] : ''
-  }
-
-  // convert vscode.NotebookData to a runme Notebook type as generated by protoc-gen-es
-  public static marshalNotebook<T extends es_proto.Notebook | Notebook>(
+class Marshal {
+  // convert vscode.NotebookData to one of two runme Notebook proto type bindings
+  public static notebook(
     data: NotebookData,
-    cls: new (dat: any) => T,
+    cls: string,
     config?: {
       marshalFrontmatter?: boolean
       kernel?: Kernel
     },
-  ): T {
-    // the bulk copies cleanly except for what's below
-    const notebook = new cls(data as any)
-    const myType = SerialHelper.myTypeOf(notebook)
-    console.log('myType:', myType)
+  ): es_proto.Notebook | Notebook {
+    // is there no better way than this ?
+    let notebook
+    if (cls === 'es_proto') {
+      notebook = new es_proto.Notebook(data as any)
+    } else {
+      notebook = Notebook.clone(data as any)
+    }
 
     // cannot gurantee it wasn't changed
     if (notebook.metadata[RUNME_FRONTMATTER_PARSED]) {
@@ -1185,20 +1053,20 @@ class SerialHelper {
       const metadata = notebook.metadata as unknown as {
         ['runme.dev/frontmatter']: string
       }
-      notebook.frontmatter = this.marshalFrontmatter(metadata, config.kernel)
+      notebook.frontmatter = Marshal.frontmatter(metadata, config.kernel)
     }
 
-    // notebook.cells.forEach(async (cell, cellIdx) => {
-    //   const dataExecSummary = data.cells[cellIdx].executionSummary
-    //   cell.executionSummary = this.marshalCellExecutionSummary(dataExecSummary)
-    //   const dataOutputs = data.cells[cellIdx].outputs
-    //   cell.outputs = this.marshalCellOutputs(cell.outputs, dataOutputs)
-    // })
+    notebook.cells.forEach(async (cell, cellIdx) => {
+      const dataExecSummary = data.cells[cellIdx].executionSummary
+      cell.executionSummary = Marshal.cellExecutionSummary(dataExecSummary)
+      const dataOutputs = data.cells[cellIdx].outputs
+      cell.outputs = Marshal.cellOutputs(cell.outputs, dataOutputs)
+    })
 
     return notebook
   }
 
-  static marshalFrontmatter(metadata: { ['runme.dev/frontmatter']?: string }, kernel?: Kernel) {
+  static frontmatter(metadata: { ['runme.dev/frontmatter']?: string }, kernel?: Kernel) {
     if (
       !metadata.hasOwnProperty('runme.dev/frontmatter') ||
       typeof metadata['runme.dev/frontmatter'] !== 'string'
@@ -1248,5 +1116,63 @@ class SerialHelper {
       skipPrompts: false,
       terminalRows: '',
     }
+  }
+
+  // if we have execution information from vscode, return it so we can augment the Cell proto
+  private static cellExecutionSummary(executionSummary: NotebookCellExecutionSummary | undefined) {
+    if (!executionSummary) {
+      return undefined
+    }
+
+    const { success, timing } = executionSummary
+    if (success === undefined || timing === undefined) {
+      return undefined
+    }
+
+    return {
+      success: { value: success },
+      timing: {
+        endTime: { value: timing!.endTime.toString() },
+        startTime: { value: timing!.startTime.toString() },
+      },
+    }
+  }
+
+  private static cellOutputs(
+    outputs: CellOutput[] | es_proto.CellOutput[],
+    dataOutputs: NotebookCellOutput[] | undefined,
+  ): CellOutput[] | es_proto.CellOutput[] {
+    if (!dataOutputs) {
+      return []
+    }
+
+    outputs.forEach((out, outIdx) => {
+      const dataOut: NotebookCellOutputWithProcessInfo = dataOutputs[outIdx]
+      // todo(sebastian): consider sending error state too
+      if (dataOut.processInfo?.exitReason?.type === 'exit') {
+        if (dataOut.processInfo.exitReason.code) {
+          if (typeof out.processInfo!.exitReason!.code === 'number') {
+            // code is a number for protoc-gen-es generated types
+            out.processInfo!.exitReason!.code = dataOut.processInfo.exitReason.code
+          } else {
+            // code is a UInt32Value for protobuf-ts generated types (and subsequently has a value property)
+            out.processInfo!.exitReason!.code!.value = dataOut.processInfo.exitReason.code
+          }
+        } else {
+          out.processInfo!.exitReason!.code = undefined
+        }
+
+        if (dataOut.processInfo?.pid !== undefined) {
+          out.processInfo!.pid = { value: dataOut.processInfo.pid.toString() }
+        } else {
+          out.processInfo!.pid = undefined
+        }
+      }
+      out.items.forEach((item) => {
+        item.type = item.data.buffer ? 'Buffer' : typeof item.data
+      })
+    })
+
+    return outputs
   }
 }
