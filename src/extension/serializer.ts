@@ -897,6 +897,7 @@ export class GrpcSerializer extends SerializerBase {
 // there is w/ grpc the : serializer, server, runner,
 export class ConnectSerializer extends SerializerBase {
   protected readonly ready: ReadyPromise
+  protected protoNotebookType: es_proto.Notebook = {} as es_proto.Notebook
   log: ReturnType<typeof getLogger>
   client: PromiseClient<typeof ParserService>
   serializerServiceUrl: string
@@ -948,16 +949,123 @@ export class ConnectSerializer extends SerializerBase {
     // })
   }
 
+  getSerializationRequest(obj: Object): es_proto.SerializeRequest {
+    return new es_proto.SerializeRequest(obj)
+  }
+
+  protected notebookDataToProto(data: NotebookData): typeof this.protoNotebookType {
+    return new es_proto.Notebook(data as any)
+  }
+
   protected async saveNotebook(
     data: NotebookData,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Uint8Array> {
-    const notebookProto = new es_proto.Notebook(data as any)
-    const notebook = Marshal.notebook(data, notebookProto) as es_proto.Notebook
-    const request = new es_proto.SerializeRequest({ notebook })
-    const response = await this.client.serialize(request)
+    const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
+
+    const notebookProto = this.notebookDataToProto(data)
+    const notebook = Marshal.notebook(data, notebookProto, {
+      marshalFrontmatter,
+    }) as typeof this.protoNotebookType
+
+    if (marshalFrontmatter) {
+      data.metadata ??= {}
+      data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
+    }
+
+    const cacheId = SerializerBase.getDocumentCacheId(data.metadata)
+    this.notebookDataCache.set(cacheId as string, data)
+
+    const serialRequest = this.getSerializationRequest({ notebook })
+
+    const maskedNotebookProto = this.notebookDataToProto(data)
+    const maskedNotebook = Marshal.notebook(data, maskedNotebookProto, {
+      marshalFrontmatter,
+    }) as typeof this.protoNotebookType
+    const cacheOutputs = this.cacheNotebookOutputs(notebook, maskedNotebook, cacheId)
+    const request = this.client!.serialize(serialRequest)
+
+    // run in parallel
+    const [response] = await Promise.all([request, cacheOutputs])
+
+    if (cacheId) {
+      await this.saveNotebookOutputsByCacheId(cacheId)
+    }
+
+    if (response.result === undefined) {
+      throw new Error('serialization of notebook failed')
+    }
+
     return response.result
+  }
+
+  // await (ser as any).cacheNotebookOutputs(fixture, 'irrelevant') ???
+  private async cacheNotebookOutputs(
+    notebook: typeof this.protoNotebookType,
+    maskedNotebook: typeof this.protoNotebookType,
+    cacheId: string | undefined,
+  ): Promise<void> {
+    let session: RunmeSession | undefined
+    const docUri = this.cacheDocUriMapping.get(cacheId ?? '')
+    const sid = this.kernel.getRunnerEnvironment()?.getSessionId()
+    if (sid && docUri) {
+      const relativePath = path.basename(docUri.fsPath)
+      session = {
+        id: sid,
+        document: { relativePath },
+      }
+    }
+
+    const outputs = { enabled: true, summary: true }
+    const options = SerializeRequestOptions.clone({
+      outputs,
+      session,
+    })
+
+    maskedNotebook.cells.forEach((cell) => {
+      cell.value = maskString(cell.value)
+      cell.outputs.forEach((out) => {
+        out.items.forEach((item) => {
+          if (item.mime === OutputType.stdout) {
+            const outDecoded = Buffer.from(item.data).toString('utf8')
+            item.data = Buffer.from(maskString(outDecoded))
+          }
+        })
+      })
+    })
+
+    const plainReq = this.getSerializationRequest({ notebook, options })
+    const plainRes = this.client!.serialize(plainReq)
+
+    const maskedReq = this.getSerializationRequest({ notebook: maskedNotebook, options })
+    const masked = this.client!.serialize(maskedReq).then((response) => {
+      if (response.result === undefined) {
+        console.error('serialization of masked notebook failed')
+        return Promise.resolve(new Uint8Array())
+      }
+      return response.result
+    })
+
+    if (!cacheId) {
+      console.error('skip masked caching since no lifecycleId was found')
+    } else {
+      this.maskedCache.set(cacheId, masked)
+    }
+
+    const plain = await plainRes
+    if (plain.result === undefined) {
+      throw new Error('serialization of notebook outputs failed')
+    }
+
+    const bytes = plain.result
+    if (!cacheId) {
+      console.error('skip plain caching since no lifecycleId was found')
+    } else {
+      this.plainCache.set(cacheId, Promise.resolve(bytes))
+    }
+
+    await Promise.all([plain, masked])
   }
 
   protected async reviveNotebook(
