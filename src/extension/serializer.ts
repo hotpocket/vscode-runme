@@ -425,12 +425,21 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
       return
     }
 
-    if (GrpcSerializer.isDocumentSessionOutputs(doc.metadata)) {
+    if (SerializerBase.isDocumentSessionOutputs(doc.metadata)) {
       this.togglePreviewButton(false)
       return
     }
 
     this.cacheDocUriMapping.set(cacheId, doc.uri)
+  }
+
+  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
+    if (!metadata) {
+      // it's not session outputs unless known
+      return false
+    }
+    const sessionOutputId = metadata[RUNME_FRONTMATTER_PARSED]?.['runme']?.['session']?.['id']
+    return Boolean(sessionOutputId)
   }
 
   async handleCloseNotebook(doc: NotebookDocument) {
@@ -658,6 +667,11 @@ export class GrpcSerializer extends SerializerBase {
     return Uri.parse(GrpcSerializer.getSourceFilePath(outputsUri.fsPath))
   }
 
+  // should probably refactor other calls to this and/or @deprecate it
+  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
+    return SerializerBase.isDocumentSessionOutputs(metadata)
+  }
+
   protected applyIdentity(data: typeof this.protoNotebookType): typeof this.protoNotebookType {
     const identity = this.lifecycleIdentity
     switch (identity) {
@@ -677,15 +691,6 @@ export class GrpcSerializer extends SerializerBase {
     }
 
     return data
-  }
-
-  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
-    if (!metadata) {
-      // it's not session outputs unless known
-      return false
-    }
-    const sessionOutputId = metadata[RUNME_FRONTMATTER_PARSED]?.['runme']?.['session']?.['id']
-    return Boolean(sessionOutputId)
   }
 
   public override async switchLifecycleIdentity(
@@ -866,7 +871,7 @@ export class GrpcSerializer extends SerializerBase {
     metadata: { ['runme.dev/frontmatter']?: string },
     kernel?: Kernel,
   ): Frontmatter {
-    return Marshal.frontmatter(metadata, kernel)
+    return Marshal.frontmatter(metadata, kernel) as Frontmatter
   }
 
   protected async reviveNotebook(
@@ -979,6 +984,9 @@ export class ConnectSerializer extends SerializerBase {
       marshalFrontmatter,
     }) as typeof this.protoNotebookType
 
+    // cast so when we serialize we don't get missing methods due to it not being a real proto
+    notebook.frontmatter = new es_proto.Frontmatter(notebook.frontmatter)
+
     if (marshalFrontmatter) {
       data.metadata ??= {}
       data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
@@ -993,6 +1001,7 @@ export class ConnectSerializer extends SerializerBase {
     const maskedNotebook = Marshal.notebook(data, maskedNotebookProto, {
       marshalFrontmatter,
     }) as typeof this.protoNotebookType
+    maskedNotebook.frontmatter = new es_proto.Frontmatter(maskedNotebook.frontmatter)
     const cacheOutputs = this.cacheNotebookOutputs(notebook, maskedNotebook, cacheId)
     const request = this.client!.serialize(serialRequest)
 
@@ -1024,7 +1033,7 @@ export class ConnectSerializer extends SerializerBase {
       session = {
         id: sid,
         document: { relativePath },
-      } as any
+      } as es_proto.RunmeSession
     }
 
     const outputs = { enabled: true, summary: true }
@@ -1137,7 +1146,10 @@ class Marshal {
     return notebookProto
   }
 
-  static frontmatter(metadata: { ['runme.dev/frontmatter']?: string }, kernel?: Kernel) {
+  static frontmatter(
+    metadata: { ['runme.dev/frontmatter']?: string },
+    kernel?: Kernel,
+  ): es_proto.Frontmatter | Frontmatter {
     if (
       !metadata.hasOwnProperty('runme.dev/frontmatter') ||
       typeof metadata['runme.dev/frontmatter'] !== 'string'
