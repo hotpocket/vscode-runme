@@ -914,6 +914,13 @@ export class ConnectSerializer extends SerializerBase {
     this.ready = new Promise((resolve) => {
       resolve()
     })
+
+    this.disposables.push(
+      // todo(sebastian): delete entries on session reset not notebook editor lifecycle
+      // workspace.onDidCloseNotebookDocument(this.handleCloseNotebook.bind(this)),
+      workspace.onDidSaveNotebookDocument(this.handleSaveNotebookOutputs.bind(this)),
+      workspace.onDidOpenNotebookDocument(this.handleOpenNotebook.bind(this)),
+    )
   }
 
   createSerializerClient = () => {
@@ -949,7 +956,10 @@ export class ConnectSerializer extends SerializerBase {
     // })
   }
 
-  getSerializationRequest(obj: Object): es_proto.SerializeRequest {
+  getSerializationRequest(obj: {
+    notebook?: es_proto.Notebook
+    options?: es_proto.SerializeRequestOptions
+  }): es_proto.SerializeRequest {
     return new es_proto.SerializeRequest(obj)
   }
 
@@ -1006,7 +1016,7 @@ export class ConnectSerializer extends SerializerBase {
     maskedNotebook: typeof this.protoNotebookType,
     cacheId: string | undefined,
   ): Promise<void> {
-    let session: RunmeSession | undefined
+    let session: es_proto.RunmeSession | undefined
     const docUri = this.cacheDocUriMapping.get(cacheId ?? '')
     const sid = this.kernel.getRunnerEnvironment()?.getSessionId()
     if (sid && docUri) {
@@ -1014,14 +1024,14 @@ export class ConnectSerializer extends SerializerBase {
       session = {
         id: sid,
         document: { relativePath },
-      }
+      } as any
     }
 
     const outputs = { enabled: true, summary: true }
-    const options = SerializeRequestOptions.clone({
+    const options = {
       outputs,
       session,
-    })
+    } as es_proto.SerializeRequestOptions
 
     maskedNotebook.cells.forEach((cell) => {
       cell.value = maskString(cell.value)
