@@ -72,6 +72,12 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
   protected readonly languages: Languages
   protected disposables: Disposable[] = []
 
+  // todo(sebastian): naive cache for now, consider use lifecycle events for gc
+  protected readonly plainCache = new Map<string, Promise<Uint8Array>>()
+  protected readonly maskedCache = new Map<string, Promise<Uint8Array>>()
+  protected readonly notebookDataCache = new Map<string, NotebookData>()
+  protected readonly cacheDocUriMapping: Map<string, Uri> = new Map<string, Uri>()
+
   constructor(
     protected context: ExtensionContext,
     protected kernel: Kernel,
@@ -389,15 +395,147 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
     return new NotebookData([new NotebookCellData(NotebookCellKind.Markup, content, languageId)])
   }
 
-  protected abstract saveNotebookOutputsByCacheId(cacheId: string): Promise<number>
+  protected async saveNotebookOutputsByCacheId(cacheId: string): Promise<number> {
+    const mode = ContextState.getKey<boolean>(NOTEBOOK_OUTPUTS_MASKED)
+    const cache = mode ? this.maskedCache : this.plainCache
+    const bytes = await cache.get(cacheId ?? '')
 
-  public abstract saveNotebookOutputs(uri: Uri): Promise<number>
+    if (!bytes) {
+      this.togglePreviewButton(false)
+      return -1
+    }
 
-  public abstract getMaskedCache(cacheId: string): Promise<Uint8Array> | undefined
+    const srcDocUri = this.cacheDocUriMapping.get(cacheId ?? '')
+    if (!srcDocUri) {
+      this.togglePreviewButton(false)
+      return -1
+    }
 
-  public abstract getPlainCache(cacheId: string): Promise<Uint8Array> | undefined
+    const runnerEnv = this.kernel.getRunnerEnvironment()
+    const sessionId = runnerEnv?.getSessionId()
+    if (!sessionId) {
+      this.togglePreviewButton(false)
+      return -1
+    }
 
-  public abstract getNotebookDataCache(cacheId: string): NotebookData | undefined
+    // Don't write to disk if auto-save is off
+    if (!ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)) {
+      this.togglePreviewButton(false)
+      // But still return a valid bytes length so the cache keeps working
+      return bytes.length
+    }
+
+    const sessionFile = GrpcSerializer.getOutputsUri(srcDocUri, sessionId)
+    if (!sessionFile) {
+      this.togglePreviewButton(false)
+      return -1
+    }
+
+    await workspace.fs.writeFile(sessionFile, bytes)
+    this.togglePreviewButton(true)
+
+    return bytes.length
+  }
+  public async saveNotebookOutputs(uri: Uri): Promise<number> {
+    let cacheId: string | undefined
+    this.cacheDocUriMapping.forEach((docUri, cid) => {
+      const src = GrpcSerializer.getSourceFileUri(uri)
+      if (docUri.fsPath.toString() === src.fsPath.toString()) {
+        cacheId = cid
+      }
+    })
+    if (!cacheId) {
+      return -1
+    }
+
+    return this.saveNotebookOutputsByCacheId(cacheId ?? '')
+  }
+
+  public getMaskedCache(cacheId: string): Promise<Uint8Array> | undefined {
+    return this.maskedCache.get(cacheId)
+  }
+
+  public getPlainCache(cacheId: string): Promise<Uint8Array> | undefined {
+    return this.plainCache.get(cacheId)
+  }
+
+  public getNotebookDataCache(cacheId: string): NotebookData | undefined {
+    return this.notebookDataCache.get(cacheId)
+  }
+
+  // What follows came strictly from GrpcSerializer. They lack dependencies
+  // on GrpcSerializer, so they were placed here for reuse in child classes.
+
+  public static getDocumentCacheId(
+    metadata: { [key: string]: any } | undefined,
+  ): string | undefined {
+    if (!metadata) {
+      return undefined
+    }
+    // cacheId is always present, stays persistent across multiple de/-serialization cycles
+    const cacheId = metadata['runme.dev/cacheId'] as string | undefined
+    return cacheId
+  }
+
+  public togglePreviewButton(state: boolean) {
+    return commands.executeCommand('setContext', NOTEBOOK_HAS_OUTPUTS, state)
+  }
+
+  async handleOpenNotebook(doc: NotebookDocument) {
+    const cacheId = SerializerBase.getDocumentCacheId(doc.metadata)
+
+    if (!cacheId) {
+      this.togglePreviewButton(false)
+      return
+    }
+
+    if (SerializerBase.isDocumentSessionOutputs(doc.metadata)) {
+      this.togglePreviewButton(false)
+      return
+    }
+
+    this.cacheDocUriMapping.set(cacheId, doc.uri)
+  }
+
+  async handleSaveNotebookOutputs(doc: NotebookDocument) {
+    const cacheId = SerializerBase.getDocumentCacheId(doc.metadata)
+
+    if (!cacheId) {
+      this.togglePreviewButton(false)
+      return
+    }
+
+    this.cacheDocUriMapping.set(cacheId, doc.uri)
+
+    await this.saveNotebookOutputsByCacheId(cacheId)
+  }
+
+  async handleCloseNotebook(doc: NotebookDocument) {
+    const cacheId = SerializerBase.getDocumentCacheId(doc.metadata)
+    /**
+     * Remove cache
+     */
+    if (cacheId) {
+      this.plainCache.delete(cacheId)
+      this.maskedCache.delete(cacheId)
+    }
+  }
+
+  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
+    if (!metadata) {
+      // it's not session outputs unless known
+      return false
+    }
+    const sessionOutputId = metadata[RUNME_FRONTMATTER_PARSED]?.['runme']?.['session']?.['id']
+    return Boolean(sessionOutputId)
+  }
+
+  static sessionOutputsEnabled() {
+    const isAutoSaveOn = ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)
+    const isSessionOutputs = getSessionOutputs()
+
+    return isSessionOutputs && isAutoSaveOn
+  }
 
   static isGhostCell(cell: NotebookCellData): boolean {
     const metadata = cell.metadata
@@ -446,51 +584,27 @@ export class WasmSerializer extends SerializerBase {
     }
     return notebook
   }
-
-  protected async saveNotebookOutputsByCacheId(_cacheId: string): Promise<number> {
-    console.error('saveNotebookOutputsByCacheId not implemented for WasmSerializer')
-    return -1
-  }
-
-  public async saveNotebookOutputs(_uri: Uri): Promise<number> {
-    console.error('saveNotebookOutputs not implemented for WasmSerializer')
-    return -1
-  }
-
-  public getMaskedCache(): Promise<Uint8Array> | undefined {
-    console.error('getMaskedCache not implemented for WasmSerializer')
-    return Promise.resolve(new Uint8Array())
-  }
-
-  public getPlainCache(): Promise<Uint8Array> | undefined {
-    console.error('getPlainCache not implemented for WasmSerializer')
-    return Promise.resolve(new Uint8Array())
-  }
-
-  public getNotebookDataCache(): NotebookData | undefined {
-    console.error('getNotebookDataCache not implemented for WasmSerializer')
-    return {} as NotebookData
-  }
 }
 
+// add "implements SerializerType" to capture all the proto junk (protoNotebookType, staticInstance, etc)
 export class GrpcSerializer extends SerializerBase {
   private client?: ParserServiceClient
   protected ready: ReadyPromise
-  // todo(sebastian): naive cache for now, consider use lifecycle events for gc
-  protected readonly plainCache = new Map<string, Promise<Uint8Array>>()
-  protected readonly maskedCache = new Map<string, Promise<Uint8Array>>()
-  protected readonly notebookDataCache = new Map<string, NotebookData>()
-  protected readonly cacheDocUriMapping: Map<string, Uri> = new Map<string, Uri>()
 
   private serverReadyListener: Disposable | undefined
+  // bridge between static and instance methods where state is irrelevant
+  protected static staticInstance: GrpcSerializer
+  // used to identify the proto notebook type in arg & return types
+  protected protoNotebookType: Notebook = {} as Notebook
 
   constructor(
     protected context: ExtensionContext,
     protected server: IServer,
     kernel: Kernel,
   ) {
+    // we need a: transport, client, and the type we'll use  for our Notebook proto
     super(context, kernel)
-
+    GrpcSerializer.getStaticInstance(context, server, kernel)
     this.togglePreviewButton(GrpcSerializer.sessionOutputsEnabled())
 
     this.ready = new Promise((resolve) => {
@@ -512,109 +626,21 @@ export class GrpcSerializer extends SerializerBase {
     )
   }
 
+  protected static getStaticInstance(
+    context: ExtensionContext,
+    server: IServer,
+    kernel: Kernel,
+  ): GrpcSerializer {
+    // singleton accessor method for staticInstance variable
+    if (!GrpcSerializer.staticInstance) {
+      GrpcSerializer.staticInstance = {} as GrpcSerializer // recursion guard
+      GrpcSerializer.staticInstance = new GrpcSerializer(context, server, kernel)
+    }
+    return GrpcSerializer.staticInstance
+  }
+
   private async initParserClient(transport?: GrpcTransport) {
     this.client = initParserClient(transport ?? (await this.server.transport()))
-  }
-
-  public togglePreviewButton(state: boolean) {
-    return commands.executeCommand('setContext', NOTEBOOK_HAS_OUTPUTS, state)
-  }
-
-  protected async handleOpenNotebook(doc: NotebookDocument) {
-    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
-
-    if (!cacheId) {
-      this.togglePreviewButton(false)
-      return
-    }
-
-    if (GrpcSerializer.isDocumentSessionOutputs(doc.metadata)) {
-      this.togglePreviewButton(false)
-      return
-    }
-
-    this.cacheDocUriMapping.set(cacheId, doc.uri)
-  }
-
-  protected async handleCloseNotebook(doc: NotebookDocument) {
-    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
-    /**
-     * Remove cache
-     */
-    if (cacheId) {
-      this.plainCache.delete(cacheId)
-      this.maskedCache.delete(cacheId)
-    }
-  }
-
-  protected async handleSaveNotebookOutputs(doc: NotebookDocument) {
-    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
-
-    if (!cacheId) {
-      this.togglePreviewButton(false)
-      return
-    }
-
-    this.cacheDocUriMapping.set(cacheId, doc.uri)
-
-    await this.saveNotebookOutputsByCacheId(cacheId)
-  }
-
-  protected async saveNotebookOutputsByCacheId(cacheId: string): Promise<number> {
-    const mode = ContextState.getKey<boolean>(NOTEBOOK_OUTPUTS_MASKED)
-    const cache = mode ? this.maskedCache : this.plainCache
-    const bytes = await cache.get(cacheId ?? '')
-
-    if (!bytes) {
-      this.togglePreviewButton(false)
-      return -1
-    }
-
-    const srcDocUri = this.cacheDocUriMapping.get(cacheId ?? '')
-    if (!srcDocUri) {
-      this.togglePreviewButton(false)
-      return -1
-    }
-
-    const runnerEnv = this.kernel.getRunnerEnvironment()
-    const sessionId = runnerEnv?.getSessionId()
-    if (!sessionId) {
-      this.togglePreviewButton(false)
-      return -1
-    }
-
-    // Don't write to disk if auto-save is off
-    if (!ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)) {
-      this.togglePreviewButton(false)
-      // But still return a valid bytes length so the cache keeps working
-      return bytes.length
-    }
-
-    const sessionFile = GrpcSerializer.getOutputsUri(srcDocUri, sessionId)
-    if (!sessionFile) {
-      this.togglePreviewButton(false)
-      return -1
-    }
-
-    await workspace.fs.writeFile(sessionFile, bytes)
-    this.togglePreviewButton(true)
-
-    return bytes.length
-  }
-
-  public async saveNotebookOutputs(uri: Uri): Promise<number> {
-    let cacheId: string | undefined
-    this.cacheDocUriMapping.forEach((docUri, cid) => {
-      const src = GrpcSerializer.getSourceFileUri(uri)
-      if (docUri.fsPath.toString() === src.fsPath.toString()) {
-        cacheId = cid
-      }
-    })
-    if (!cacheId) {
-      return -1
-    }
-
-    return this.saveNotebookOutputsByCacheId(cacheId ?? '')
   }
 
   public static getOutputsFilePath(fsPath: string, sid: string): string {
@@ -648,7 +674,12 @@ export class GrpcSerializer extends SerializerBase {
     return Uri.parse(GrpcSerializer.getSourceFilePath(outputsUri.fsPath))
   }
 
-  protected applyIdentity(data: Notebook): Notebook {
+  // should probably refactor other calls to this and/or @deprecate it
+  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
+    return SerializerBase.isDocumentSessionOutputs(metadata)
+  }
+
+  protected applyIdentity(data: typeof this.protoNotebookType): typeof this.protoNotebookType {
     const identity = this.lifecycleIdentity
     switch (identity) {
       case RunmeIdentity.UNSPECIFIED:
@@ -667,28 +698,6 @@ export class GrpcSerializer extends SerializerBase {
     }
 
     return data
-  }
-
-  public static getDocumentCacheId(
-    metadata: { [key: string]: any } | undefined,
-  ): string | undefined {
-    if (!metadata) {
-      return undefined
-    }
-
-    // cacheId is always present, stays persistent across multiple de/-serialization cycles
-    const cacheId = metadata['runme.dev/cacheId'] as string | undefined
-
-    return cacheId
-  }
-
-  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
-    if (!metadata) {
-      // it's not session outputs unless known
-      return false
-    }
-    const sessionOutputId = metadata[RUNME_FRONTMATTER_PARSED]?.['runme']?.['session']?.['id']
-    return Boolean(sessionOutputId)
   }
 
   public override async switchLifecycleIdentity(
@@ -733,6 +742,17 @@ export class GrpcSerializer extends SerializerBase {
     return await workspace.applyEdit(edit)
   }
 
+  protected makeNewNotebookProto(data: NotebookData | Notebook): typeof this.protoNotebookType {
+    return Notebook.clone(data as any)
+  }
+
+  protected getSerializationRequest(obj: {
+    notebook: Notebook
+    options?: SerializeRequestOptions
+  }): SerializeRequest {
+    return <SerializeRequest>{ ...obj }
+  }
+
   protected async saveNotebook(
     data: NotebookData,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -747,11 +767,10 @@ export class GrpcSerializer extends SerializerBase {
       data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
     }
 
-    const cacheId = GrpcSerializer.getDocumentCacheId(data.metadata)
+    const cacheId = SerializerBase.getDocumentCacheId(data.metadata)
     this.notebookDataCache.set(cacheId as string, data)
 
-    const serialRequest = <SerializeRequest>{ notebook }
-
+    const serialRequest = this.getSerializationRequest({ notebook })
     const cacheOutputs = this.cacheNotebookOutputs(notebook, cacheId)
     const request = this.client!.serialize(serialRequest)
 
@@ -769,14 +788,7 @@ export class GrpcSerializer extends SerializerBase {
 
     return result
   }
-
-  static sessionOutputsEnabled() {
-    const isAutoSaveOn = ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)
-    const isSessionOutputs = getSessionOutputs()
-
-    return isSessionOutputs && isAutoSaveOn
-  }
-
+  // Mask "sensitive" outputs in maskedNotebook and then serialize both notebooks in parallel
   private async cacheNotebookOutputs(
     notebook: Notebook,
     cacheId: string | undefined,
@@ -797,8 +809,7 @@ export class GrpcSerializer extends SerializerBase {
       outputs,
       session,
     })
-
-    const maskedNotebook = Notebook.clone(notebook)
+    const maskedNotebook = this.makeNewNotebookProto(notebook)
     maskedNotebook.cells.forEach((cell) => {
       cell.value = maskString(cell.value)
       cell.outputs.forEach((out) => {
@@ -811,10 +822,10 @@ export class GrpcSerializer extends SerializerBase {
       })
     })
 
-    const plainReq = <SerializeRequest>{ notebook, options }
+    const plainReq = this.getSerializationRequest({ notebook, options })
     const plainRes = this.client!.serialize(plainReq)
 
-    const maskedReq = <SerializeRequest>{ notebook: maskedNotebook, options }
+    const maskedReq = this.getSerializationRequest({ notebook: maskedNotebook, options })
     const masked = this.client!.serialize(maskedReq).then((maskedRes) => {
       if (maskedRes.response.result === undefined) {
         console.error('serialization of masked notebook failed')
@@ -853,7 +864,7 @@ export class GrpcSerializer extends SerializerBase {
     },
   ): Notebook {
     // the bulk copies cleanly except for what's below
-    const notebook = Notebook.clone(data as any)
+    const notebook = this.staticInstance.makeNewNotebookProto(data)
 
     // cannot gurantee it wasn't changed
     if (notebook.metadata[RUNME_FRONTMATTER_PARSED]) {
@@ -990,6 +1001,7 @@ export class GrpcSerializer extends SerializerBase {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     token: CancellationToken,
   ): Promise<Serializer.Notebook> {
+    // @todo Serializer.Notebook is a custom type that has timostamm/protobuf-ts types embeded in it...
     const identity = this.lifecycleIdentity
     const deserialRequest = DeserializeRequest.create({ source: content, options: { identity } })
     const request = await this.client!.deserialize(deserialRequest)
@@ -1008,17 +1020,5 @@ export class GrpcSerializer extends SerializerBase {
   public dispose(): void {
     this.serverReadyListener?.dispose()
     super.dispose()
-  }
-
-  public getMaskedCache(cacheId: string): Promise<Uint8Array> | undefined {
-    return this.maskedCache.get(cacheId)
-  }
-
-  public getPlainCache(cacheId: string): Promise<Uint8Array> | undefined {
-    return this.plainCache.get(cacheId)
-  }
-
-  public getNotebookDataCache(cacheId: string): NotebookData | undefined {
-    return this.notebookDataCache.get(cacheId)
   }
 }
