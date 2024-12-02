@@ -788,7 +788,7 @@ export class GrpcSerializer extends SerializerBase {
 
     return result
   }
-  // Mask "sensitive" outputs in maskedNotebook and then serialize both notebooks in parallel
+  // copy notebook, Mask "sensitive" outputs in it, and then serialize both notebooks in parallel
   private async cacheNotebookOutputs(
     notebook: Notebook,
     cacheId: string | undefined,
@@ -862,7 +862,7 @@ export class GrpcSerializer extends SerializerBase {
       marshalFrontmatter?: boolean
       kernel?: Kernel
     },
-  ): Notebook {
+  ): typeof this.staticInstance.protoNotebookType {
     // the bulk copies cleanly except for what's below
     const notebook = this.staticInstance.makeNewNotebookProto(data)
 
@@ -975,7 +975,7 @@ export class GrpcSerializer extends SerializerBase {
     return outputs
   }
 
-  private static marshalCellExecutionSummary(
+  protected static marshalCellExecutionSummary(
     executionSummary: NotebookCellExecutionSummary | undefined,
   ) {
     if (!executionSummary) {
