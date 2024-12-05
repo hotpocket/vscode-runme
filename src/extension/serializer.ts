@@ -69,6 +69,8 @@ type NotebookCellOutputWithProcessInfo = NotebookCellOutput & {
 
 export abstract class SerializerBase implements NotebookSerializer, Disposable {
   protected abstract readonly ready: ReadyPromise
+  protected abstract typeNotebook?: any // should be a proto type in the child class
+  protected abstract client?: any
   protected readonly languages: Languages
   protected disposables: Disposable[] = []
 
@@ -98,6 +100,10 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
   protected get lifecycleIdentity() {
     return ContextState.getKey<ServerLifecycleIdentity>(NOTEBOOK_LIFECYCLE_ID)
   }
+
+  protected abstract cloneNotebook(
+    data: NotebookData | typeof this.typeNotebook,
+  ): typeof this.typeNotebook
 
   /**
    * Handle newly added cells (live edits) to have IDs
@@ -395,6 +401,37 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
     return new NotebookData([new NotebookCellData(NotebookCellKind.Markup, content, languageId)])
   }
 
+  public static getOutputsFilePath(fsPath: string, sid: string): string {
+    const fileDir = path.dirname(fsPath)
+    const fileExt = path.extname(fsPath)
+    const fileBase = path.basename(fsPath, fileExt)
+    const filePath = path.normalize(`${fileDir}/${fileBase}-${sid}${fileExt}`)
+
+    return filePath
+  }
+
+  public static getOutputsUri(docUri: Uri, sessionId: string): Uri {
+    return Uri.parse(SerializerBase.getOutputsFilePath(docUri.fsPath, sessionId))
+  }
+
+  public static getSourceFilePath(outputsFile: string): string {
+    const fileExt = path.extname(outputsFile)
+    let fileBase = path.basename(outputsFile, fileExt)
+    const parts = fileBase.split('-')
+    if (parts.length > 1) {
+      parts.pop()
+    }
+    fileBase = parts.join('-')
+    const fileDir = path.dirname(outputsFile)
+    const filePath = path.normalize(`${fileDir}/${fileBase}${fileExt}`)
+
+    return filePath
+  }
+
+  public static getSourceFileUri(outputsUri: Uri): Uri {
+    return Uri.parse(SerializerBase.getSourceFilePath(outputsUri.fsPath))
+  }
+
   protected async saveNotebookOutputsByCacheId(cacheId: string): Promise<number> {
     const mode = ContextState.getKey<boolean>(NOTEBOOK_OUTPUTS_MASKED)
     const cache = mode ? this.maskedCache : this.plainCache
@@ -425,7 +462,7 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
       return bytes.length
     }
 
-    const sessionFile = GrpcSerializer.getOutputsUri(srcDocUri, sessionId)
+    const sessionFile = SerializerBase.getOutputsUri(srcDocUri, sessionId)
     if (!sessionFile) {
       this.togglePreviewButton(false)
       return -1
@@ -436,10 +473,11 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
 
     return bytes.length
   }
+
   public async saveNotebookOutputs(uri: Uri): Promise<number> {
     let cacheId: string | undefined
     this.cacheDocUriMapping.forEach((docUri, cid) => {
-      const src = GrpcSerializer.getSourceFileUri(uri)
+      const src = SerializerBase.getSourceFileUri(uri)
       if (docUri.fsPath.toString() === src.fsPath.toString()) {
         cacheId = cid
       }
@@ -541,352 +579,6 @@ export abstract class SerializerBase implements NotebookSerializer, Disposable {
     const metadata = cell.metadata
     return metadata?.[ghost.ghostKey] === true
   }
-}
-
-export class WasmSerializer extends SerializerBase {
-  protected readonly ready: ReadyPromise
-
-  constructor(
-    protected context: ExtensionContext,
-    kernel: Kernel,
-  ) {
-    super(context, kernel)
-    const wasmUri = Uri.joinPath(this.context.extensionUri, 'wasm', 'runme.wasm')
-    this.ready = initWasm(wasmUri)
-  }
-
-  protected async saveNotebook(
-    data: NotebookData,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    token: CancellationToken,
-  ): Promise<Uint8Array> {
-    const { Runme } = globalThis as Serializer.Wasm
-
-    const notebook = JSON.stringify(data)
-    const markdown = await Runme.serialize(notebook)
-
-    const encoder = new TextEncoder()
-    return encoder.encode(markdown)
-  }
-
-  protected async reviveNotebook(
-    content: Uint8Array,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    token: CancellationToken,
-  ): Promise<Serializer.Notebook> {
-    const { Runme } = globalThis as Serializer.Wasm
-
-    const markdown = Buffer.from(content).toString('utf8')
-    const notebook = await Runme.deserialize(markdown)
-
-    if (!notebook) {
-      return this.printCell('⚠️ __Error__: no cells found!')
-    }
-    return notebook
-  }
-}
-
-// add "implements SerializerType" to capture all the proto junk (protoNotebookType, staticInstance, etc)
-export class GrpcSerializer extends SerializerBase {
-  private client?: ParserServiceClient
-  protected ready: ReadyPromise
-
-  private serverReadyListener: Disposable | undefined
-  // bridge between static and instance methods where state is irrelevant
-  protected static staticInstance: GrpcSerializer
-  // used to identify the proto notebook type in arg & return types
-  protected protoNotebookType: Notebook = {} as Notebook
-
-  constructor(
-    protected context: ExtensionContext,
-    protected server: IServer,
-    kernel: Kernel,
-  ) {
-    // we need a: transport, client, and the type we'll use  for our Notebook proto
-    super(context, kernel)
-    GrpcSerializer.getStaticInstance(context, server, kernel)
-    this.togglePreviewButton(GrpcSerializer.sessionOutputsEnabled())
-
-    this.ready = new Promise((resolve) => {
-      const disposable = server.onTransportReady(() => {
-        disposable.dispose()
-        resolve()
-      })
-    })
-
-    this.serverReadyListener = server.onTransportReady(({ transport }) =>
-      this.initParserClient(transport),
-    )
-
-    this.disposables.push(
-      // todo(sebastian): delete entries on session reset not notebook editor lifecycle
-      // workspace.onDidCloseNotebookDocument(this.handleCloseNotebook.bind(this)),
-      workspace.onDidSaveNotebookDocument(this.handleSaveNotebookOutputs.bind(this)),
-      workspace.onDidOpenNotebookDocument(this.handleOpenNotebook.bind(this)),
-    )
-  }
-
-  protected static getStaticInstance(
-    context: ExtensionContext,
-    server: IServer,
-    kernel: Kernel,
-  ): GrpcSerializer {
-    // singleton accessor method for staticInstance variable
-    if (!GrpcSerializer.staticInstance) {
-      GrpcSerializer.staticInstance = {} as GrpcSerializer // recursion guard
-      GrpcSerializer.staticInstance = new GrpcSerializer(context, server, kernel)
-    }
-    return GrpcSerializer.staticInstance
-  }
-
-  private async initParserClient(transport?: GrpcTransport) {
-    this.client = initParserClient(transport ?? (await this.server.transport()))
-  }
-
-  public static getOutputsFilePath(fsPath: string, sid: string): string {
-    const fileDir = path.dirname(fsPath)
-    const fileExt = path.extname(fsPath)
-    const fileBase = path.basename(fsPath, fileExt)
-    const filePath = path.normalize(`${fileDir}/${fileBase}-${sid}${fileExt}`)
-
-    return filePath
-  }
-
-  public static getOutputsUri(docUri: Uri, sessionId: string): Uri {
-    return Uri.parse(GrpcSerializer.getOutputsFilePath(docUri.fsPath, sessionId))
-  }
-
-  public static getSourceFilePath(outputsFile: string): string {
-    const fileExt = path.extname(outputsFile)
-    let fileBase = path.basename(outputsFile, fileExt)
-    const parts = fileBase.split('-')
-    if (parts.length > 1) {
-      parts.pop()
-    }
-    fileBase = parts.join('-')
-    const fileDir = path.dirname(outputsFile)
-    const filePath = path.normalize(`${fileDir}/${fileBase}${fileExt}`)
-
-    return filePath
-  }
-
-  public static getSourceFileUri(outputsUri: Uri): Uri {
-    return Uri.parse(GrpcSerializer.getSourceFilePath(outputsUri.fsPath))
-  }
-
-  // should probably refactor other calls to this and/or @deprecate it
-  public static isDocumentSessionOutputs(metadata: { [key: string]: any } | undefined): boolean {
-    return SerializerBase.isDocumentSessionOutputs(metadata)
-  }
-
-  protected applyIdentity(data: typeof this.protoNotebookType): typeof this.protoNotebookType {
-    const identity = this.lifecycleIdentity
-    switch (identity) {
-      case RunmeIdentity.UNSPECIFIED:
-      case RunmeIdentity.DOCUMENT:
-        break
-      default: {
-        data.cells.forEach((cell) => {
-          if (cell.kind !== CellKind.CODE) {
-            return
-          }
-          if (!cell.metadata?.['id'] && cell.metadata?.['runme.dev/id']) {
-            cell.metadata['id'] = cell.metadata['runme.dev/id']
-          }
-        })
-      }
-    }
-
-    return data
-  }
-
-  public override async switchLifecycleIdentity(
-    notebook: NotebookDocument,
-    identity: RunmeIdentity,
-  ): Promise<boolean> {
-    // skip session outputs files
-    if (!!notebook.metadata['runme.dev/frontmatterParsed']?.runme?.session?.id) {
-      return false
-    }
-
-    await notebook.save()
-    const source = await workspace.fs.readFile(notebook.uri)
-    const des = await this.client!.deserialize(
-      DeserializeRequest.create({
-        source,
-        options: { identity },
-      }),
-    )
-
-    const deserialized = des.response.notebook
-    if (!deserialized) {
-      return false
-    }
-
-    deserialized.metadata = { ...deserialized.metadata, ...notebook.metadata }
-    const notebookEdit = NotebookEdit.updateNotebookMetadata(deserialized.metadata)
-    const edits = [notebookEdit]
-    notebook.getCells().forEach((cell) => {
-      const descell = deserialized.cells[cell.index]
-      // skip if no IDs are present, means no cell identity required
-      if (!descell.metadata?.['id']) {
-        return
-      }
-      const metadata = { ...descell.metadata, ...cell.metadata }
-      metadata['id'] = metadata['runme.dev/id']
-      edits.push(NotebookEdit.updateCellMetadata(cell.index, metadata))
-    })
-
-    const edit = new WorkspaceEdit()
-    edit.set(notebook.uri, edits)
-    return await workspace.applyEdit(edit)
-  }
-
-  protected makeNewNotebookProto(data: NotebookData | Notebook): typeof this.protoNotebookType {
-    return Notebook.clone(data as any)
-  }
-
-  protected getSerializationRequest(obj: {
-    notebook: Notebook
-    options?: SerializeRequestOptions
-  }): SerializeRequest {
-    return <SerializeRequest>{ ...obj }
-  }
-
-  protected async saveNotebook(
-    data: NotebookData,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    token: CancellationToken,
-  ): Promise<Uint8Array> {
-    const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
-
-    const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
-
-    if (marshalFrontmatter) {
-      data.metadata ??= {}
-      data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
-    }
-
-    const cacheId = SerializerBase.getDocumentCacheId(data.metadata)
-    this.notebookDataCache.set(cacheId as string, data)
-
-    const serialRequest = this.getSerializationRequest({ notebook })
-    const cacheOutputs = this.cacheNotebookOutputs(notebook, cacheId)
-    const request = this.client!.serialize(serialRequest)
-
-    // run in parallel
-    const [serialResult] = await Promise.all([request, cacheOutputs])
-
-    if (cacheId) {
-      await this.saveNotebookOutputsByCacheId(cacheId)
-    }
-
-    const { result } = serialResult.response
-    if (result === undefined) {
-      throw new Error('serialization of notebook failed')
-    }
-
-    return result
-  }
-  // copy notebook, Mask "sensitive" outputs in it, and then serialize both notebooks in parallel
-  private async cacheNotebookOutputs(
-    notebook: Notebook,
-    cacheId: string | undefined,
-  ): Promise<void> {
-    let session: RunmeSession | undefined
-    const docUri = this.cacheDocUriMapping.get(cacheId ?? '')
-    const sid = this.kernel.getRunnerEnvironment()?.getSessionId()
-    if (sid && docUri) {
-      const relativePath = path.basename(docUri.fsPath)
-      session = {
-        id: sid,
-        document: { relativePath },
-      }
-    }
-
-    const outputs = { enabled: true, summary: true }
-    const options = SerializeRequestOptions.clone({
-      outputs,
-      session,
-    })
-    const maskedNotebook = this.makeNewNotebookProto(notebook)
-    maskedNotebook.cells.forEach((cell) => {
-      cell.value = maskString(cell.value)
-      cell.outputs.forEach((out) => {
-        out.items.forEach((item) => {
-          if (item.mime === OutputType.stdout) {
-            const outDecoded = Buffer.from(item.data).toString('utf8')
-            item.data = Buffer.from(maskString(outDecoded))
-          }
-        })
-      })
-    })
-
-    const plainReq = this.getSerializationRequest({ notebook, options })
-    const plainRes = this.client!.serialize(plainReq)
-
-    const maskedReq = this.getSerializationRequest({ notebook: maskedNotebook, options })
-    const masked = this.client!.serialize(maskedReq).then((maskedRes) => {
-      if (maskedRes.response.result === undefined) {
-        console.error('serialization of masked notebook failed')
-        return Promise.resolve(new Uint8Array())
-      }
-      return maskedRes.response.result
-    })
-
-    if (!cacheId) {
-      console.error('skip masked caching since no lifecycleId was found')
-    } else {
-      this.maskedCache.set(cacheId, masked)
-    }
-
-    const plain = await plainRes
-    if (plain.response.result === undefined) {
-      throw new Error('serialization of notebook outputs failed')
-    }
-
-    const bytes = plain.response.result
-    if (!cacheId) {
-      console.error('skip plain caching since no lifecycleId was found')
-    } else {
-      this.plainCache.set(cacheId, Promise.resolve(bytes))
-    }
-
-    await Promise.all([plain, masked])
-  }
-
-  // marshalNotebook converts VSCode's NotebookData to the Notebook proto.
-  public static marshalNotebook(
-    data: NotebookData,
-    config?: {
-      marshalFrontmatter?: boolean
-      kernel?: Kernel
-    },
-  ): typeof this.staticInstance.protoNotebookType {
-    // the bulk copies cleanly except for what's below
-    const notebook = this.staticInstance.makeNewNotebookProto(data)
-
-    // cannot gurantee it wasn't changed
-    if (notebook.metadata[RUNME_FRONTMATTER_PARSED]) {
-      delete notebook.metadata[RUNME_FRONTMATTER_PARSED]
-    }
-
-    if (config?.marshalFrontmatter) {
-      const metadata = notebook.metadata as unknown as {
-        ['runme.dev/frontmatter']: string
-      }
-      notebook.frontmatter = this.marshalFrontmatter(metadata, config.kernel)
-    }
-
-    notebook.cells.forEach(async (cell, cellIdx) => {
-      const dataExecSummary = data.cells[cellIdx].executionSummary
-      cell.executionSummary = this.marshalCellExecutionSummary(dataExecSummary)
-      const dataOutputs = data.cells[cellIdx].outputs
-      cell.outputs = this.marshalCellOutputs(cell.outputs, dataOutputs)
-    })
-
-    return notebook
-  }
 
   static marshalFrontmatter(
     metadata: { ['runme.dev/frontmatter']?: string },
@@ -943,6 +635,347 @@ export class GrpcSerializer extends SerializerBase {
     }
   }
 
+  protected static marshalCellExecutionSummary(
+    executionSummary: NotebookCellExecutionSummary | undefined,
+  ) {
+    if (!executionSummary) {
+      return undefined
+    }
+
+    const { success, timing } = executionSummary
+    if (success === undefined || timing === undefined) {
+      return undefined
+    }
+
+    return {
+      success: { value: success },
+      timing: {
+        endTime: { value: timing!.endTime.toString() },
+        startTime: { value: timing!.startTime.toString() },
+      },
+    }
+  }
+}
+
+export class WasmSerializer extends SerializerBase {
+  protected readonly ready: ReadyPromise
+
+  // required by SerializerBase
+  protected typeNotebook!: Serializer.Notebook
+  protected client?: any
+
+  constructor(
+    protected context: ExtensionContext,
+    kernel: Kernel,
+  ) {
+    super(context, kernel)
+    const wasmUri = Uri.joinPath(this.context.extensionUri, 'wasm', 'runme.wasm')
+    this.ready = initWasm(wasmUri)
+  }
+
+  protected async saveNotebook(
+    data: NotebookData,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Uint8Array> {
+    const { Runme } = globalThis as Serializer.Wasm
+
+    const notebook = JSON.stringify(data)
+    const markdown = await Runme.serialize(notebook)
+
+    const encoder = new TextEncoder()
+    return encoder.encode(markdown)
+  }
+
+  protected async reviveNotebook(
+    content: Uint8Array,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Serializer.Notebook> {
+    const { Runme } = globalThis as Serializer.Wasm
+
+    const markdown = Buffer.from(content).toString('utf8')
+    const notebook = await Runme.deserialize(markdown)
+
+    if (!notebook) {
+      return this.printCell('⚠️ __Error__: no cells found!')
+    }
+    return notebook
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected cloneNotebook(data: NotebookData | typeof this.typeNotebook): typeof this.typeNotebook {
+    console.error('cloneNotebook is not implemented for WasmSerializer')
+    return {} as typeof this.typeNotebook
+  }
+}
+
+export class GrpcSerializer extends SerializerBase {
+  protected client!: ParserServiceClient
+  protected readonly ready: ReadyPromise
+
+  private serverReadyListener?: Disposable
+  // bridge between static and instance methods where state is irrelevant
+  protected static staticInstance: GrpcSerializer
+  // used to identify the proto notebook type in arg & return types
+  protected typeNotebook!: Notebook
+
+  constructor(
+    protected context: ExtensionContext,
+    protected server: IServer,
+    kernel: Kernel,
+  ) {
+    // we need a: transport, client, and the type we'll use  for our Notebook proto
+    super(context, kernel)
+    GrpcSerializer.getStaticInstance(context, server, kernel)
+    this.togglePreviewButton(GrpcSerializer.sessionOutputsEnabled())
+
+    this.ready = new Promise((resolve) => {
+      const disposable = server.onTransportReady(() => {
+        disposable.dispose()
+        resolve()
+      })
+    })
+
+    this.serverReadyListener = server.onTransportReady(({ transport }) =>
+      this.initParserClient(transport),
+    )
+
+    this.disposables.push(
+      // todo(sebastian): delete entries on session reset not notebook editor lifecycle
+      // workspace.onDidCloseNotebookDocument(this.handleCloseNotebook.bind(this)),
+      workspace.onDidSaveNotebookDocument(this.handleSaveNotebookOutputs.bind(this)),
+      workspace.onDidOpenNotebookDocument(this.handleOpenNotebook.bind(this)),
+    )
+  }
+
+  protected static getStaticInstance(
+    context: ExtensionContext,
+    server: IServer,
+    kernel: Kernel,
+  ): GrpcSerializer {
+    // singleton accessor method for staticInstance variable
+    if (!GrpcSerializer.staticInstance) {
+      GrpcSerializer.staticInstance = {} as GrpcSerializer // recursion guard
+      GrpcSerializer.staticInstance = new GrpcSerializer(context, server, kernel)
+    }
+    return GrpcSerializer.staticInstance
+  }
+
+  private async initParserClient(transport?: GrpcTransport) {
+    this.client = initParserClient(transport ?? (await this.server.transport()))
+  }
+
+  protected applyIdentity(data: typeof this.typeNotebook): typeof this.typeNotebook {
+    const identity = this.lifecycleIdentity
+    switch (identity) {
+      case RunmeIdentity.UNSPECIFIED:
+      case RunmeIdentity.DOCUMENT:
+        break
+      default: {
+        data.cells.forEach((cell) => {
+          if (cell.kind !== CellKind.CODE) {
+            return
+          }
+          if (!cell.metadata?.['id'] && cell.metadata?.['runme.dev/id']) {
+            cell.metadata['id'] = cell.metadata['runme.dev/id']
+          }
+        })
+      }
+    }
+
+    return data
+  }
+
+  public override async switchLifecycleIdentity(
+    notebook: NotebookDocument,
+    identity: RunmeIdentity, //pts_type
+  ): Promise<boolean> {
+    // skip session outputs files
+    if (!!notebook.metadata['runme.dev/frontmatterParsed']?.runme?.session?.id) {
+      return false
+    }
+
+    await notebook.save()
+    const source = await workspace.fs.readFile(notebook.uri)
+    const des = await this.client.deserialize(
+      //pts_type
+      DeserializeRequest.create({
+        source,
+        options: { identity },
+      }),
+    )
+
+    const deserialized = des.response.notebook
+    if (!deserialized) {
+      return false
+    }
+
+    deserialized.metadata = { ...deserialized.metadata, ...notebook.metadata }
+    const notebookEdit = NotebookEdit.updateNotebookMetadata(deserialized.metadata)
+    const edits = [notebookEdit]
+    notebook.getCells().forEach((cell) => {
+      const descell = deserialized.cells[cell.index]
+      // skip if no IDs are present, means no cell identity required
+      if (!descell.metadata?.['id']) {
+        return
+      }
+      const metadata = { ...descell.metadata, ...cell.metadata }
+      metadata['id'] = metadata['runme.dev/id']
+      edits.push(NotebookEdit.updateCellMetadata(cell.index, metadata))
+    })
+
+    const edit = new WorkspaceEdit()
+    edit.set(notebook.uri, edits)
+    return await workspace.applyEdit(edit)
+  }
+
+  protected cloneNotebook(data: NotebookData | typeof this.typeNotebook): typeof this.typeNotebook {
+    return Notebook.clone(data as any)
+  }
+
+  protected getSerializationRequest(obj: {
+    notebook: Notebook
+    options?: SerializeRequestOptions
+  }): SerializeRequest {
+    return <SerializeRequest>{ ...obj }
+  }
+
+  protected async saveNotebook(
+    data: NotebookData,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Uint8Array> {
+    const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
+
+    const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
+
+    if (marshalFrontmatter) {
+      data.metadata ??= {}
+      data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
+    }
+
+    const cacheId = SerializerBase.getDocumentCacheId(data.metadata)
+    this.notebookDataCache.set(cacheId as string, data)
+
+    const serialRequest = this.getSerializationRequest({ notebook })
+    const cacheOutputs = this.cacheNotebookOutputs(notebook, cacheId)
+    const request = this.client.serialize(serialRequest)
+
+    // run in parallel
+    const [serialResult] = await Promise.all([request, cacheOutputs])
+
+    if (cacheId) {
+      await this.saveNotebookOutputsByCacheId(cacheId)
+    }
+
+    const { result } = serialResult.response
+    if (result === undefined) {
+      throw new Error('serialization of notebook failed')
+    }
+
+    return result
+  }
+  // copy notebook, Mask "sensitive" outputs in it, and then serialize both notebooks in parallel
+  private async cacheNotebookOutputs(
+    notebook: Notebook,
+    cacheId: string | undefined,
+  ): Promise<void> {
+    let session: RunmeSession | undefined
+    const docUri = this.cacheDocUriMapping.get(cacheId ?? '')
+    const sid = this.kernel.getRunnerEnvironment()?.getSessionId()
+    if (sid && docUri) {
+      const relativePath = path.basename(docUri.fsPath)
+      session = {
+        id: sid,
+        document: { relativePath },
+      }
+    }
+
+    const outputs = { enabled: true, summary: true }
+    const options = SerializeRequestOptions.clone({
+      outputs,
+      session,
+    })
+    const maskedNotebook = this.cloneNotebook(notebook)
+    maskedNotebook.cells.forEach((cell) => {
+      cell.value = maskString(cell.value)
+      cell.outputs.forEach((out) => {
+        out.items.forEach((item) => {
+          if (item.mime === OutputType.stdout) {
+            const outDecoded = Buffer.from(item.data).toString('utf8')
+            item.data = Buffer.from(maskString(outDecoded))
+          }
+        })
+      })
+    })
+
+    const plainReq = this.getSerializationRequest({ notebook, options })
+    const plainRes = this.client.serialize(plainReq)
+
+    const maskedReq = this.getSerializationRequest({ notebook: maskedNotebook, options })
+    const masked = this.client.serialize(maskedReq).then((maskedRes) => {
+      if (maskedRes.response.result === undefined) {
+        console.error('serialization of masked notebook failed')
+        return Promise.resolve(new Uint8Array())
+      }
+      return maskedRes.response.result
+    })
+
+    if (!cacheId) {
+      console.error('skip masked caching since no lifecycleId was found')
+    } else {
+      this.maskedCache.set(cacheId, masked)
+    }
+
+    const plain = await plainRes
+    if (plain.response.result === undefined) {
+      throw new Error('serialization of notebook outputs failed')
+    }
+
+    const bytes = plain.response.result
+    if (!cacheId) {
+      console.error('skip plain caching since no lifecycleId was found')
+    } else {
+      this.plainCache.set(cacheId, Promise.resolve(bytes))
+    }
+
+    await Promise.all([plain, masked])
+  }
+
+  // marshalNotebook converts VSCode's NotebookData to the Notebook proto.
+  public static marshalNotebook(
+    data: NotebookData,
+    config?: {
+      marshalFrontmatter?: boolean
+      kernel?: Kernel
+    },
+  ): typeof this.staticInstance.typeNotebook {
+    // the bulk copies cleanly except for what's below
+    const notebook = this.staticInstance.cloneNotebook(data)
+
+    // cannot gurantee it wasn't changed
+    if (notebook.metadata[RUNME_FRONTMATTER_PARSED]) {
+      delete notebook.metadata[RUNME_FRONTMATTER_PARSED]
+    }
+
+    if (config?.marshalFrontmatter) {
+      const metadata = notebook.metadata as unknown as {
+        ['runme.dev/frontmatter']: string
+      }
+      notebook.frontmatter = this.marshalFrontmatter(metadata, config.kernel)
+    }
+
+    notebook.cells.forEach(async (cell, cellIdx) => {
+      const dataExecSummary = data.cells[cellIdx].executionSummary
+      cell.executionSummary = this.marshalCellExecutionSummary(dataExecSummary)
+      const dataOutputs = data.cells[cellIdx].outputs
+      cell.outputs = this.marshalCellOutputs(cell.outputs, dataOutputs)
+    })
+
+    return notebook
+  }
+
   private static marshalCellOutputs(
     outputs: CellOutput[],
     dataOutputs: NotebookCellOutput[] | undefined,
@@ -975,27 +1008,6 @@ export class GrpcSerializer extends SerializerBase {
     return outputs
   }
 
-  protected static marshalCellExecutionSummary(
-    executionSummary: NotebookCellExecutionSummary | undefined,
-  ) {
-    if (!executionSummary) {
-      return undefined
-    }
-
-    const { success, timing } = executionSummary
-    if (success === undefined || timing === undefined) {
-      return undefined
-    }
-
-    return {
-      success: { value: success },
-      timing: {
-        endTime: { value: timing!.endTime.toString() },
-        startTime: { value: timing!.startTime.toString() },
-      },
-    }
-  }
-
   protected async reviveNotebook(
     content: Uint8Array,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1004,7 +1016,7 @@ export class GrpcSerializer extends SerializerBase {
     // @todo Serializer.Notebook is a custom type that has timostamm/protobuf-ts types embeded in it...
     const identity = this.lifecycleIdentity
     const deserialRequest = DeserializeRequest.create({ source: content, options: { identity } })
-    const request = await this.client!.deserialize(deserialRequest)
+    const request = await this.client.deserialize(deserialRequest)
 
     const { notebook } = request.response
     if (notebook === undefined) {
