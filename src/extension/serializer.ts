@@ -40,7 +40,7 @@ import {
   RUNME_FRONTMATTER_PARSED,
   VSCODE_LANGUAGEID_MAP,
 } from '../constants'
-import { ServerLifecycleIdentity, getSessionOutputs } from '../utils/configuration'
+import { ServerLifecycleIdentity, getSessionOutputs, getTLSDir } from '../utils/configuration'
 
 import {
   DeserializeRequest,
@@ -1082,26 +1082,25 @@ export class ConnectSerializer extends GrpcSerializerBase {
     //   (c) other, manually configured
 
     // I will assume 2a here
-    const tlsPath = path.normalize(__dirname + '/../tls')
-    const keyPath = `${tlsPath}/key.pem`
-    const certPath = `${tlsPath}/cert.pem`
+    const getTls = () => {
+      try {
+        const tlsPath = getTLSDir(Uri.parse(this.context.extensionPath))
+        return {
+          key: fs.readFileSync(`${tlsPath}/key.pem`),
+          cert: fs.readFileSync(`${tlsPath}/cert.pem`),
+        }
+      } catch (e: any) {
+        throw new Error(`Failed to read TLS files: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
 
     let grpcOptions = {
       baseUrl: this.serializerServiceUrl,
       httpVersion: '2',
-      nodeOptions: {
-        rejectUnauthorized: false, // allow self-signed certificates
-        cert: fs.readFileSync(certPath),
-        key: fs.readFileSync(keyPath),
-      },
+      nodeOptions: { ...getTls(), rejectUnauthorized: false },
     } as GrpcTransportOptions
 
     return createPromiseClient(ParserService, createGrpcTransport(grpcOptions))
-
-    // return createConnectTransport({
-    //   baseUrl: this.serializerServiceUrl,
-    //   httpVersion: '1.1',
-    // })
   }
 
   protected async saveNotebook(
@@ -1162,6 +1161,12 @@ export class ConnectSerializer extends GrpcSerializerBase {
       throw e
     }
     const notebook = res.notebook
+
+    if (notebook === undefined) {
+      throw new Error('deserialization failed to revive notebook')
+    }
+
+    this.applyIdentity(notebook)
 
     if (!notebook) {
       return this.printCell('⚠️ __Error__: no cells found!')
