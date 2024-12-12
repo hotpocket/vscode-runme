@@ -1252,12 +1252,12 @@ export class ConnectSerializer extends GrpcSerializerBase {
     }
 
     const outputs = { enabled: true, summary: true }
-    const options = SerializeRequestOptions.clone({
+    const options = new es_proto.SerializeRequestOptions({
       outputs,
       session,
     })
 
-    const maskedNotebook = new es_proto.Notebook(notebook)
+    const maskedNotebook = notebook.clone()
     maskedNotebook.cells.forEach((cell) => {
       cell.value = maskString(cell.value)
       cell.outputs.forEach((out) => {
