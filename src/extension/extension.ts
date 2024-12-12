@@ -73,13 +73,7 @@ import {
   runForkCommand,
   selectEnvironment,
 } from './commands'
-import {
-  WasmSerializer,
-  GrpcSerializer,
-  SerializerBase,
-  ConnectSerializer,
-  GrpcSerializerBase,
-} from './serializer'
+import { WasmSerializer, SerializerBase, GrpcSerializer, GrpcSerializerBase } from './serializer'
 import { RunmeLauncherProvider, RunmeTreeProvider } from './provider/launcher'
 import { RunmeLauncherProvider as RunmeLauncherProviderBeta } from './provider/launcherBeta'
 import { RunmeUriHandler } from './handler/uri'
@@ -110,8 +104,6 @@ export class RunmeExtension {
     const grpcSerializer = kernel.hasExperimentEnabled('grpcSerializer')
     const grpcServer = kernel.hasExperimentEnabled('grpcServer')
     const grpcRunner = kernel.hasExperimentEnabled('grpcRunner')
-    const config = workspace.getConfiguration('runme')
-    const serializerAddress = config.get<string>('serializerAddress')
 
     const server = new KernelServer(
       context.extensionUri,
@@ -136,14 +128,10 @@ export class RunmeExtension {
     )
 
     const reporter = new GrpcReporter(context, server)
-    let serializer: SerializerBase
-    if (serializerAddress && serializerAddress.length > 0) {
-      serializer = new ConnectSerializer(context, serializerAddress, kernel)
-    } else if (grpcSerializer) {
-      serializer = new GrpcSerializer(context, server, kernel)
-    } else {
-      serializer = new WasmSerializer(context, kernel)
-    }
+
+    const serializer = grpcSerializer
+      ? new GrpcSerializer(context, server, kernel)
+      : new WasmSerializer(context, kernel)
     this.serializer = serializer
     kernel.setSerializer(serializer as GrpcSerializerBase)
     kernel.setReporter(reporter)
