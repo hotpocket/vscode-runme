@@ -190,7 +190,7 @@ export default async function saveCellExecution(
       const result = await graphClient.mutate(mutation as MutationOptions)
       data = result
     }
-    // TODO: Remove the legacy create`ecution mutation once the reporter is fully tested.
+    // TODO: Remove the legacy createCellExecution mutation once the reporter is fully tested.
     else {
       const cell = await getCellById({ editor, id: message.output.id })
       if (!cell) {
