@@ -70,7 +70,7 @@ import {
   runForkCommand,
   selectEnvironment,
 } from './commands'
-import { WasmSerializer, SerializerBase, GrpcSerializer, GrpcSerializerBase } from './serializer'
+import { WasmSerializer, SerializerBase, GrpcSerializer } from './serializer'
 import { RunmeLauncherProvider, RunmeTreeProvider } from './provider/launcher'
 import { RunmeLauncherProvider as RunmeLauncherProviderBeta } from './provider/launcherBeta'
 import { RunmeUriHandler } from './handler/uri'
@@ -131,7 +131,7 @@ export class RunmeExtension {
       ? new GrpcSerializer(context, server, kernel)
       : new WasmSerializer(context, kernel)
     this.serializer = serializer
-    kernel.setSerializer(serializer as GrpcSerializerBase)
+    kernel.setSerializer(serializer as GrpcSerializer)
     kernel.setReporter(reporter)
 
     let treeViewer: RunmeTreeProvider

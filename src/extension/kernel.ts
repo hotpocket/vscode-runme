@@ -103,7 +103,7 @@ import { handleCellOutputMessage } from './messages/cellOutput'
 import handleGitHubMessage, { handleGistMessage } from './messages/github'
 import { getNotebookCategories } from './utils'
 import PanelManager from './panels/panelManager'
-import { GrpcSerializerBase } from './serializer'
+import { GrpcSerializer } from './serializer'
 import { askAlternativeOutputsAction, openSplitViewAsMarkdownText } from './commands'
 import { handlePlatformApiMessage } from './messages/platformRequest'
 import { handleGCPMessage } from './messages/gcp'
@@ -151,7 +151,7 @@ export class Kernel implements Disposable {
   protected activeTerminals: ActiveTerminal[] = []
   protected category?: string
   protected panelManager: PanelManager
-  protected serializer?: GrpcSerializerBase
+  protected serializer?: GrpcSerializer
   protected reporter?: GrpcReporter
   protected featuresState$?: FeatureObserver
 
@@ -290,7 +290,7 @@ export class Kernel implements Disposable {
     this.category = category
   }
 
-  setSerializer(serializer: GrpcSerializerBase) {
+  setSerializer(serializer: GrpcSerializer) {
     this.serializer = serializer
   }
 
@@ -335,7 +335,7 @@ export class Kernel implements Disposable {
   }
 
   async #setNotebookMode(notebookDocument: NotebookDocument): Promise<void> {
-    const isSessionsOutput = GrpcSerializerBase.isDocumentSessionOutputs(notebookDocument.metadata)
+    const isSessionsOutput = GrpcSerializer.isDocumentSessionOutputs(notebookDocument.metadata)
     const notebookMode = isSessionsOutput ? NotebookMode.SessionOutputs : NotebookMode.Execution
     await ContextState.addKey(NOTEBOOK_MODE, notebookMode)
   }
@@ -688,7 +688,7 @@ export class Kernel implements Disposable {
 
   private async _executeAll(cells: NotebookCell[]) {
     const sessionOutputsDoc = cells.find((c) =>
-      GrpcSerializerBase.isDocumentSessionOutputs(c.notebook.metadata),
+      GrpcSerializer.isDocumentSessionOutputs(c.notebook.metadata),
     )
     if (sessionOutputsDoc) {
       const { notebook } = sessionOutputsDoc

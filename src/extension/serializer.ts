@@ -473,9 +473,10 @@ export class WasmSerializer extends SerializerBase {
   }
 }
 
-// no common ancestor, any type used for protos
-export abstract class GrpcSerializerBase extends SerializerBase {
-  protected client: any
+export class GrpcSerializer extends SerializerBase {
+  private client!: ConnectClient<typeof ParserService>
+  protected ready: ReadyPromise
+  protected serverUrl!: string
 
   // todo(sebastian): naive cache for now, consider use lifecycle events for gc
   protected readonly plainCache = new Map<string, Promise<Uint8Array>>()
@@ -483,14 +484,25 @@ export abstract class GrpcSerializerBase extends SerializerBase {
   protected readonly notebookDataCache = new Map<string, NotebookData>()
   protected readonly cacheDocUriMapping: Map<string, Uri> = new Map<string, Uri>()
 
+  private serverReadyListener?: Disposable
+
   constructor(
     protected context: ExtensionContext,
+    protected server: IServer,
     kernel: Kernel,
   ) {
     super(context, kernel)
 
-    this.togglePreviewButton(GrpcSerializerBase.sessionOutputsEnabled())
+    this.togglePreviewButton(GrpcSerializer.sessionOutputsEnabled())
 
+    // cleanup listener when it's outlived its purpose
+    this.ready = new Promise((resolve) => {
+      const disposable = server.onTransportReady(() => {
+        disposable.dispose()
+        resolve()
+      })
+    })
+    this.serverReadyListener = server.onTransportReady(() => this.initClient())
     this.disposables.push(
       // todo(sebastian): delete entries on session reset not notebook editor lifecycle
       // workspace.onDidCloseNotebookDocument(this.handleCloseNotebook.bind(this)),
@@ -499,21 +511,59 @@ export abstract class GrpcSerializerBase extends SerializerBase {
     )
   }
 
-  protected abstract cacheNotebookOutputs(notebook: any, cacheId: string | undefined): Promise<void>
+  private initClient(): void {
+    // Server options:
+    // (1) pre-existing, started internally by this extension (assuming local execution so it has permissions to start)
+    // (2) pre-existing, started externally, presumably at the this.serverUrl address
+    //   In both cases we need a key & cert (assuming tls) which may reside in:
+    //   (a) this project: '/path/to/projectRoot/tls'
+    //   (b) the runme binary server default: '~/.config/runme/tls'
+    //   (c) other, manually configured
+
+    // assuming 2a, which is the default when starting the server as a result of loading this extension
+    const addTlsConfigIfEnabled = () => {
+      try {
+        if (!getTLSEnabled()) {
+          return {}
+        }
+        const tlsPath = getTLSDir(Uri.parse(this.context.extensionPath))
+        return {
+          nodeOptions: {
+            key: fs.readFileSync(`${tlsPath}/key.pem`),
+            cert: fs.readFileSync(`${tlsPath}/cert.pem`),
+            rejectUnauthorized: false,
+          },
+        }
+      } catch (e: any) {
+        throw new Error(`Failed to read TLS files: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
+    const s = getTLSEnabled() ? 's' : ''
+    this.serverUrl = `http${s}://${this.server.address()}`
+
+    let grpcOptions = <GrpcTransportOptions>{
+      baseUrl: this.serverUrl,
+      httpVersion: '2',
+      ...addTlsConfigIfEnabled(),
+    }
+
+    this.client = createConnectClient(ParserService, createGrpcTransport(grpcOptions))
+  }
 
   public togglePreviewButton(state: boolean) {
     return commands.executeCommand('setContext', NOTEBOOK_HAS_OUTPUTS, state)
   }
 
   protected async handleOpenNotebook(doc: NotebookDocument) {
-    const cacheId = GrpcSerializerBase.getDocumentCacheId(doc.metadata)
+    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
 
     if (!cacheId) {
       this.togglePreviewButton(false)
       return
     }
 
-    if (GrpcSerializerBase.isDocumentSessionOutputs(doc.metadata)) {
+    if (GrpcSerializer.isDocumentSessionOutputs(doc.metadata)) {
       this.togglePreviewButton(false)
       return
     }
@@ -521,8 +571,8 @@ export abstract class GrpcSerializerBase extends SerializerBase {
     this.cacheDocUriMapping.set(cacheId, doc.uri)
   }
 
-  async handleCloseNotebook(doc: NotebookDocument) {
-    const cacheId = GrpcSerializerBase.getDocumentCacheId(doc.metadata)
+  protected async handleCloseNotebook(doc: NotebookDocument) {
+    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
     /**
      * Remove cache
      */
@@ -532,8 +582,8 @@ export abstract class GrpcSerializerBase extends SerializerBase {
     }
   }
 
-  async handleSaveNotebookOutputs(doc: NotebookDocument) {
-    const cacheId = GrpcSerializerBase.getDocumentCacheId(doc.metadata)
+  protected async handleSaveNotebookOutputs(doc: NotebookDocument) {
+    const cacheId = GrpcSerializer.getDocumentCacheId(doc.metadata)
 
     if (!cacheId) {
       this.togglePreviewButton(false)
@@ -575,7 +625,7 @@ export abstract class GrpcSerializerBase extends SerializerBase {
       return bytes.length
     }
 
-    const sessionFile = GrpcSerializerBase.getOutputsUri(srcDocUri, sessionId)
+    const sessionFile = GrpcSerializer.getOutputsUri(srcDocUri, sessionId)
     if (!sessionFile) {
       this.togglePreviewButton(false)
       return -1
@@ -590,7 +640,7 @@ export abstract class GrpcSerializerBase extends SerializerBase {
   public async saveNotebookOutputs(uri: Uri): Promise<number> {
     let cacheId: string | undefined
     this.cacheDocUriMapping.forEach((docUri, cid) => {
-      const src = GrpcSerializerBase.getSourceFileUri(uri)
+      const src = GrpcSerializer.getSourceFileUri(uri)
       if (docUri.fsPath.toString() === src.fsPath.toString()) {
         cacheId = cid
       }
@@ -612,7 +662,7 @@ export abstract class GrpcSerializerBase extends SerializerBase {
   }
 
   public static getOutputsUri(docUri: Uri, sessionId: string): Uri {
-    return Uri.parse(GrpcSerializerBase.getOutputsFilePath(docUri.fsPath, sessionId))
+    return Uri.parse(GrpcSerializer.getOutputsFilePath(docUri.fsPath, sessionId))
   }
 
   public static getSourceFilePath(outputsFile: string): string {
@@ -630,26 +680,28 @@ export abstract class GrpcSerializerBase extends SerializerBase {
   }
 
   public static getSourceFileUri(outputsUri: Uri): Uri {
-    return Uri.parse(GrpcSerializerBase.getSourceFilePath(outputsUri.fsPath))
+    return Uri.parse(GrpcSerializer.getSourceFilePath(outputsUri.fsPath))
   }
 
-  public getMaskedCache(cacheId: string): Promise<Uint8Array> | undefined {
-    return this.maskedCache.get(cacheId)
-  }
+  protected applyIdentity(data: es_proto.Notebook): es_proto.Notebook {
+    const identity = this.lifecycleIdentity
+    switch (identity) {
+      case es_proto.RunmeIdentity.UNSPECIFIED:
+      case es_proto.RunmeIdentity.DOCUMENT:
+        break
+      default: {
+        data.cells.forEach((cell) => {
+          if (cell.kind !== es_proto.CellKind.CODE) {
+            return
+          }
+          if (!cell.metadata?.['id'] && cell.metadata?.['runme.dev/id']) {
+            cell.metadata['id'] = cell.metadata['runme.dev/id']
+          }
+        })
+      }
+    }
 
-  public getPlainCache(cacheId: string): Promise<Uint8Array> | undefined {
-    return this.plainCache.get(cacheId)
-  }
-
-  public getNotebookDataCache(cacheId: string): NotebookData | undefined {
-    return this.notebookDataCache.get(cacheId)
-  }
-
-  static sessionOutputsEnabled() {
-    const isAutoSaveOn = ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)
-    const isSessionOutputs = getSessionOutputs()
-
-    return isSessionOutputs && isAutoSaveOn
+    return data
   }
 
   public static getDocumentCacheId(
@@ -674,168 +726,6 @@ export abstract class GrpcSerializerBase extends SerializerBase {
     return Boolean(sessionOutputId)
   }
 
-  // unable to implement marshal methods here, the underlying object structure is the same but
-  // the data types of the properties are different in some cases, presumably due to compile flags
-}
-
-export class GrpcSerializer extends GrpcSerializerBase {
-  client!: ConnectClient<typeof ParserService>
-  protected ready: ReadyPromise
-  protected serverUrl!: string
-
-  private serverReadyListener?: Disposable
-
-  constructor(
-    protected context: ExtensionContext,
-    protected server: IServer,
-    kernel: Kernel,
-  ) {
-    super(context, kernel)
-    this.ready = new Promise((resolve) => {
-      resolve()
-    })
-    this.serverReadyListener = server.onTransportReady(() => this.initClient())
-    // cleanup listener when it's outlived its purpose
-    this.ready = new Promise((resolve) => {
-      const disposable = server.onTransportReady(() => {
-        disposable.dispose()
-        resolve()
-      })
-    })
-  }
-
-  private initClient(): void {
-    // Server options:
-    // (1) pre-existing, started internally by this extension (assuming local execution so it has permissions to start)
-    // (2) pre-existing, started externally, presumably at the this.serializerServiceUrl address
-    //   In both cases we need a key & cert (assuming tls) which may reside in:
-    //   (a) this project: '/path/to/projectRoot/tls'
-    //   (b) the runme binary server default: '~/.config/runme/tls'
-    //   (c) other, manually configured
-
-    // I will assume 2a here
-    const addTlsConfigIfEnabled = () => {
-      try {
-        if (!getTLSEnabled()) {
-          return {}
-        }
-        const tlsPath = getTLSDir(Uri.parse(this.context.extensionPath))
-        return {
-          nodeOptions: {
-            key: fs.readFileSync(`${tlsPath}/key.pem`),
-            cert: fs.readFileSync(`${tlsPath}/cert.pem`),
-            rejectUnauthorized: false,
-          },
-        }
-      } catch (e: any) {
-        throw new Error(`Failed to read TLS files: ${e instanceof Error ? e.message : String(e)}`)
-      }
-    }
-
-    const s = getTLSEnabled() ? 's' : ''
-    this.serverUrl = `http${s}://${this.server.address()}`
-
-    let grpcOptions = <GrpcTransportOptions>{
-      baseUrl: this.serverUrl,
-      httpVersion: '2',
-      ...addTlsConfigIfEnabled(),
-    }
-
-    this.client = createConnectClient(ParserService, createGrpcTransport(grpcOptions))
-  }
-
-  protected async saveNotebook(
-    data: NotebookData,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    token: CancellationToken,
-  ): Promise<Uint8Array> {
-    const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
-
-    const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
-
-    if (marshalFrontmatter) {
-      data.metadata ??= {}
-      data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
-    }
-
-    const cacheId = GrpcSerializerBase.getDocumentCacheId(data.metadata)
-    this.notebookDataCache.set(cacheId as string, data)
-
-    const serialRequest = new es_proto.SerializeRequest({ notebook })
-
-    const cacheOutputs = this.cacheNotebookOutputs(notebook, cacheId)
-    const request = this.client.serialize(serialRequest)
-
-    // run in parallel
-    const [serialResult] = await Promise.all([request, cacheOutputs])
-
-    if (cacheId) {
-      await this.saveNotebookOutputsByCacheId(cacheId)
-    }
-
-    if (serialResult.result === undefined) {
-      throw new Error('serialization of notebook failed')
-    }
-
-    return serialResult.result
-  }
-
-  protected async reviveNotebook(
-    content: Uint8Array,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    token: CancellationToken,
-  ): Promise<Serializer.Notebook> {
-    const identity = this.lifecycleIdentity
-    // const markdown = Buffer.from(content).toString('utf8')
-    const deserializeRequest = new es_proto.DeserializeRequest({
-      source: content,
-      options: { identity },
-    })
-    let res
-    try {
-      res = await this.client.deserialize(deserializeRequest)
-    } catch (e: any) {
-      if (e.name === 'ConnectError') {
-        e.message = `Unable to connect to the serializer service at ${this.serverUrl}`
-      }
-      log.error('Error in reviveNotebook  ', e as any)
-      throw e
-    }
-    const notebook = res.notebook
-
-    if (notebook === undefined) {
-      throw new Error('deserialization failed to revive notebook')
-    }
-
-    this.applyIdentity(notebook)
-
-    if (!notebook) {
-      return this.printCell('⚠️ __Error__: no cells found!')
-    }
-    return notebook as any as Serializer.Notebook // ugly cast :(
-  }
-
-  protected applyIdentity(data: es_proto.Notebook): es_proto.Notebook {
-    const identity = this.lifecycleIdentity
-    switch (identity) {
-      case es_proto.RunmeIdentity.UNSPECIFIED:
-      case es_proto.RunmeIdentity.DOCUMENT:
-        break
-      default: {
-        data.cells.forEach((cell) => {
-          if (cell.kind !== es_proto.CellKind.CODE) {
-            return
-          }
-          if (!cell.metadata?.['id'] && cell.metadata?.['runme.dev/id']) {
-            cell.metadata['id'] = cell.metadata['runme.dev/id']
-          }
-        })
-      }
-    }
-
-    return data
-  }
-
   public override async switchLifecycleIdentity(
     notebook: NotebookDocument,
     identity: es_proto.RunmeIdentity,
@@ -847,11 +737,12 @@ export class GrpcSerializer extends GrpcSerializerBase {
 
     await notebook.save()
     const source = await workspace.fs.readFile(notebook.uri)
-    const dr = new es_proto.DeserializeRequest({
+    const dreq = new es_proto.DeserializeRequest({
       source,
       options: { identity },
     })
-    const deserialized = (await this.client.deserialize(dr)).notebook
+
+    const deserialized = (await this.client.deserialize(dreq)).notebook
 
     if (!deserialized) {
       return false
@@ -876,8 +767,51 @@ export class GrpcSerializer extends GrpcSerializerBase {
     return await workspace.applyEdit(edit)
   }
 
+  protected async saveNotebook(
+    data: NotebookData,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Uint8Array> {
+    const marshalFrontmatter = this.lifecycleIdentity === RunmeIdentity.ALL
+
+    const notebook = GrpcSerializer.marshalNotebook(data, { marshalFrontmatter })
+
+    if (marshalFrontmatter) {
+      data.metadata ??= {}
+      data.metadata[RUNME_FRONTMATTER_PARSED] = notebook.frontmatter
+    }
+
+    const cacheId = GrpcSerializer.getDocumentCacheId(data.metadata)
+    this.notebookDataCache.set(cacheId as string, data)
+
+    const serialRequest = new es_proto.SerializeRequest({ notebook })
+
+    const cacheOutputs = this.cacheNotebookOutputs(notebook, cacheId)
+    const request = this.client.serialize(serialRequest)
+
+    // run in parallel
+    const [serialResult] = await Promise.all([request, cacheOutputs])
+
+    if (cacheId) {
+      await this.saveNotebookOutputsByCacheId(cacheId)
+    }
+
+    if (serialResult.result === undefined) {
+      throw new Error('serialization of notebook failed')
+    }
+
+    return serialResult.result
+  }
+
+  static sessionOutputsEnabled() {
+    const isAutoSaveOn = ContextState.getKey<boolean>(NOTEBOOK_AUTOSAVE_ON)
+    const isSessionOutputs = getSessionOutputs()
+
+    return isSessionOutputs && isAutoSaveOn
+  }
+
   // unable to abstract due to RunmeSession struct potential differences & notebook ts type validation issues
-  protected async cacheNotebookOutputs(
+  private async cacheNotebookOutputs(
     notebook: es_proto.Notebook,
     cacheId: string | undefined,
   ): Promise<void> {
@@ -988,7 +922,7 @@ export class GrpcSerializer extends GrpcSerializerBase {
       log.warn('no frontmatter found in metadata')
       return new es_proto.Frontmatter({
         category: '',
-        // tag: '',  //?? es_proto does not have tag, but timostam/prototype-ts does??
+        // tag: '',  // buf-es does not have tag property, but the old timostam/prototype-ts did
         cwd: '',
         runme: {
           id: '',
@@ -1024,7 +958,7 @@ export class GrpcSerializer extends GrpcSerializerBase {
         session: { id: kernel?.getRunnerEnvironment()?.getSessionId() || '' },
       },
       category: '',
-      // tag: '',  // es_proto does not have tag
+      // tag: '',  // es_proto does not have a tag property, but timostamm-ts did
       cwd: '',
       shell: '',
       skipPrompts: false,
@@ -1083,5 +1017,57 @@ export class GrpcSerializer extends GrpcSerializerBase {
         startTime: BigInt(timing!.startTime),
       },
     })
+  }
+
+  protected async reviveNotebook(
+    content: Uint8Array,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    token: CancellationToken,
+  ): Promise<Serializer.Notebook> {
+    const identity = this.lifecycleIdentity
+    const deserializeRequest = new es_proto.DeserializeRequest({
+      source: content,
+      options: { identity },
+    })
+    let res
+    try {
+      res = await this.client.deserialize(deserializeRequest)
+    } catch (e: any) {
+      if (e.name === 'ConnectError') {
+        e.message = `Unable to connect to the serializer service at ${this.serverUrl}`
+      }
+      log.error('Error in reviveNotebook  ', e as any)
+      throw e
+    }
+    const notebook = res.notebook
+
+    if (notebook === undefined) {
+      throw new Error('deserialization failed to revive notebook')
+    }
+
+    this.applyIdentity(notebook)
+
+    if (!notebook) {
+      return this.printCell('⚠️ __Error__: no cells found!')
+    }
+    // we can remove ugly casting once we switch to GRPC
+    return notebook as unknown as Serializer.Notebook
+  }
+
+  public dispose(): void {
+    this.serverReadyListener?.dispose()
+    super.dispose()
+  }
+
+  public getMaskedCache(cacheId: string): Promise<Uint8Array> | undefined {
+    return this.maskedCache.get(cacheId)
+  }
+
+  public getPlainCache(cacheId: string): Promise<Uint8Array> | undefined {
+    return this.plainCache.get(cacheId)
+  }
+
+  public getNotebookDataCache(cacheId: string): NotebookData | undefined {
+    return this.notebookDataCache.get(cacheId)
   }
 }

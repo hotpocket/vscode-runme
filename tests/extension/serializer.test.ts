@@ -10,12 +10,7 @@ import { expect, vi, it, describe, beforeEach } from 'vitest'
 import { isValid } from 'ulidx'
 import { RunmeIdentity, Notebook } from '@buf/stateful_runme.bufbuild_es/runme/parser/v1/parser_pb'
 
-import {
-  GrpcSerializer,
-  SerializerBase,
-  WasmSerializer,
-  GrpcSerializerBase,
-} from '../../src/extension/serializer'
+import { GrpcSerializer, SerializerBase, WasmSerializer } from '../../src/extension/serializer'
 import type { Kernel } from '../../src/extension/kernel'
 import { EventEmitter, Uri } from '../../__mocks__/vscode'
 import { Serializer } from '../../src/types'
@@ -523,7 +518,7 @@ describe('GrpcSerializer', () => {
 
       const serializer: any = new GrpcSerializer(context, new Server(), new Kernel())
 
-      vi.spyOn(GrpcSerializerBase, 'getOutputsUri').mockReturnValue(fakeSrcDocUri)
+      vi.spyOn(GrpcSerializer, 'getOutputsUri').mockReturnValue(fakeSrcDocUri)
 
       await serializer.handleOpenNotebook({
         uri: fakeSrcDocUri,
@@ -598,7 +593,7 @@ describe('GrpcSerializer', () => {
           fixture.metadata['runme.dev/frontmatterParsed'].runme.id,
           fakeCachedBytes,
         )
-        GrpcSerializerBase.getOutputsUri = vi.fn().mockImplementation(() => undefined)
+        GrpcSerializer.getOutputsUri = vi.fn().mockImplementation(() => undefined)
         await serializer.handleSaveNotebookOutputs({
           uri: fakeSrcDocUri,
           metadata: fixture.metadata,
@@ -637,7 +632,7 @@ describe('GrpcSerializer', () => {
         writeableSer.cacheDocUriMapping.set(fixture.metadata['runme.dev/cacheId'], fakeSrcDocUri)
         ContextState.getKey = vi.fn().mockImplementation(() => true)
         GrpcSerializer.sessionOutputsEnabled = vi.fn().mockReturnValue(true)
-        GrpcSerializerBase.getOutputsUri = vi.fn().mockImplementation(() => fakeSrcDocUri)
+        GrpcSerializer.getOutputsUri = vi.fn().mockImplementation(() => fakeSrcDocUri)
 
         const result = await writeableSer.serializeNotebook(
           { cells: [], metadata: fixture.metadata } as any,
