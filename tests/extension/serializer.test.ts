@@ -487,9 +487,7 @@ describe('GrpcSerializer', () => {
       const items = cells.outputs[0].items
       expect(items.length).toBe(2)
       items.forEach((item) => {
-        // item.data is a Uint8Array in both the es and ts proto type
-        // is this a bug? if so where: in the fixture, the proto, the serializer?
-        expect((item.data as any).type).toBe('Buffer')
+        expect(item.type).toBe('Buffer')
         expect(item.mime).toBeDefined()
       })
       const { processInfo } = cells.outputs[0]
