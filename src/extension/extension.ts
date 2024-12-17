@@ -70,7 +70,7 @@ import {
   runForkCommand,
   selectEnvironment,
 } from './commands'
-import { WasmSerializer, SerializerBase, GrpcSerializer } from './serializer'
+import { WasmSerializer, GrpcSerializer, SerializerBase } from './serializer'
 import { RunmeLauncherProvider, RunmeTreeProvider } from './provider/launcher'
 import { RunmeLauncherProvider as RunmeLauncherProviderBeta } from './provider/launcherBeta'
 import { RunmeUriHandler } from './handler/uri'
@@ -126,7 +126,6 @@ export class RunmeExtension {
     )
 
     const reporter = new GrpcReporter(context, server)
-
     const serializer = grpcSerializer
       ? new GrpcSerializer(context, server, kernel)
       : new WasmSerializer(context, kernel)
