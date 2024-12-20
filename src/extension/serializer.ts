@@ -1,5 +1,4 @@
 import path from 'node:path'
-import fs from 'node:fs'
 
 import {
   NotebookSerializer,
@@ -50,18 +49,13 @@ import {
   RUNME_FRONTMATTER_PARSED,
   VSCODE_LANGUAGEID_MAP,
 } from '../constants'
-import {
-  ServerLifecycleIdentity,
-  getSessionOutputs,
-  getTLSDir,
-  getTLSEnabled,
-} from '../utils/configuration'
+import { ServerLifecycleIdentity, getSessionOutputs, getTLSEnabled } from '../utils/configuration'
 
 import { type ReadyPromise } from './grpc/client'
 import Languages from './languages'
 import { PLATFORM_OS } from './constants'
 import { initWasm } from './utils'
-import { IServer } from './server/kernelServer'
+import KernelServer from './server/kernelServer'
 import { Kernel } from './kernel'
 import { getCellById } from './cell'
 import { IProcessInfoState } from './terminal/terminalState'
@@ -498,7 +492,7 @@ export class GrpcSerializer extends SerializerBase {
 
   constructor(
     protected context: ExtensionContext,
-    protected server: IServer,
+    protected server: KernelServer,
     kernel: Kernel,
   ) {
     super(context, kernel)
@@ -512,7 +506,7 @@ export class GrpcSerializer extends SerializerBase {
         resolve()
       })
     })
-    this.serverReadyListener = server.onTransportReady(() => this.initClient())
+    this.serverReadyListener = server.onTransportReady(async () => await this.initClient())
     this.disposables.push(
       // todo(sebastian): delete entries on session reset not notebook editor lifecycle
       // workspace.onDidCloseNotebookDocument(this.handleCloseNotebook.bind(this)),
@@ -521,7 +515,7 @@ export class GrpcSerializer extends SerializerBase {
     )
   }
 
-  private initClient(): void {
+  private async initClient(): Promise<void> {
     // Server options:
     // (1) pre-existing, started internally by this extension (assuming local execution so it has permissions to start)
     // (2) pre-existing, started externally, presumably at the this.serverUrl address
@@ -531,16 +525,17 @@ export class GrpcSerializer extends SerializerBase {
     //   (c) other, manually configured
 
     // assuming 2a, which is the default when starting the server as a result of loading this extension
-    const addTlsConfigIfEnabled = () => {
+    const addTlsConfigIfEnabled = async () => {
       try {
         if (!getTLSEnabled()) {
           return {}
         }
-        const tlsPath = getTLSDir(Uri.parse(this.context.extensionPath))
+        const pems = await KernelServer.getTLS(this.server.getTLSDir())
+
         return {
           nodeOptions: {
-            key: fs.readFileSync(`${tlsPath}/key.pem`),
-            cert: fs.readFileSync(`${tlsPath}/cert.pem`),
+            key: pems.privKeyPEM,
+            cert: pems.certPEM,
             rejectUnauthorized: false,
           },
         }
@@ -551,11 +546,11 @@ export class GrpcSerializer extends SerializerBase {
 
     const s = getTLSEnabled() ? 's' : ''
     this.serverUrl = `http${s}://${this.server.address()}`
-
+    const tlsConfig = await addTlsConfigIfEnabled()
     let grpcOptions = <GrpcTransportOptions>{
       baseUrl: this.serverUrl,
       httpVersion: '2',
-      ...addTlsConfigIfEnabled(),
+      ...tlsConfig,
     }
 
     this.client = createConnectClient(ParserService, createGrpcTransport(grpcOptions))
