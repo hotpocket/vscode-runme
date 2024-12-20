@@ -932,7 +932,7 @@ export class GrpcSerializer extends SerializerBase {
       log.warn('no frontmatter found in metadata')
       return new Frontmatter({
         category: '',
-        // tag: '',  // buf-es does not have tag property, but the old timostam/prototype-ts did
+        tag: '', // buf-es does not have tag property, but the old timostam/prototype-ts did
         cwd: '',
         runme: {
           id: '',
@@ -968,7 +968,7 @@ export class GrpcSerializer extends SerializerBase {
         session: { id: kernel?.getRunnerEnvironment()?.getSessionId() || '' },
       },
       category: '',
-      // tag: '',  // es_proto does not have a tag property, but timostamm-ts did
+      tag: '', // es_proto does not have a tag property, but timostamm-ts did
       cwd: '',
       shell: '',
       skipPrompts: false,
