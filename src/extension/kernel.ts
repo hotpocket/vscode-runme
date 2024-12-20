@@ -289,7 +289,7 @@ export class Kernel implements Disposable {
     this.category = category
   }
 
-  setSerializer(serializer: GrpcSerializer) {
+  setSerializer(serializer: SerializerBase) {
     this.serializer = serializer
   }
 
